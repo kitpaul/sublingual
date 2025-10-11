@@ -874,7 +874,7 @@ get_imdb_from_omdb() {
     movie_name="${movie_name//[._-]/ }"
     movie_name="$(echo "$movie_name" | xargs)"
 
-    local url="https://www.omdbapi.com/?apikey=${OMDB_KEY}&t=$(url_encode "$movie_name")&type=movie"
+    local url="https://www.omdbapi.com/?apikey=${OMDB_KEY}&t=$(url_encode "$movie_name")&type=movie&plot=full"
     [[ -n "$year" ]] && url="${url}&y=${year}"
 
     debug "OMDb URL: $url"
@@ -934,7 +934,7 @@ get_imdb_from_omdb() {
         # Check API limit before second attempt
         check_api_limit || return 1
 
-        local url_no_year="https://www.omdbapi.com/?apikey=${OMDB_KEY}&t=$(url_encode "$movie_name")&type=movie"
+        local url_no_year="https://www.omdbapi.com/?apikey=${OMDB_KEY}&t=$(url_encode "$movie_name")&type=movie&plot=full"
         response="$(safe_curl "$url_no_year")" || return 1
 
         # Increment API counter after successful call
@@ -985,6 +985,79 @@ get_imdb_from_omdb() {
     # Rate limiting: sleep after each OMDB API call (even on failure)
     sleep 0.5
     return 1
+}
+
+# Validate and enrich IMDb ID using direct ID lookup
+# Takes an IMDb ID and returns structured metadata
+# Returns structured data similar to get_imdb_from_omdb:
+# IMDB:tt1234567
+# PLOT:Movie description...
+# DIRECTOR:Director Name
+# GENRE:Action, Drama
+# RUNTIME:120 min
+# RATING:PG-13
+# PREMIERED:2024-04-16
+validate_imdb_id() {
+    local imdb_id="$1"
+
+    [[ -z "${OMDB_KEY}" ]] && return 1
+    [[ -z "$imdb_id" ]] && return 1
+
+    # Validate IMDb ID format
+    if ! echo "$imdb_id" | grep -qE '^tt[0-9]{7,8}$'; then
+        debug "Invalid IMDb ID format: $imdb_id"
+        return 1
+    fi
+
+    local url="https://www.omdbapi.com/?apikey=${OMDB_KEY}&i=${imdb_id}&type=movie&plot=full"
+
+    debug "Validating IMDb ID via OMDb: $url"
+
+    # Check API limit before making the call
+    check_api_limit || return 1
+
+    local response
+    response="$(safe_curl "$url")" || return 1
+
+    # Increment API counter after successful call
+    increment_api_count
+
+    debug "OMDb validation response (first 200 chars): ${response:0:200}"
+
+    # Check if response is valid
+    local response_status=$(echo "$response" | grep -oE '"Response":"[^"]*"' | cut -d'"' -f4)
+
+    if [[ "$response_status" != "True" ]]; then
+        debug "IMDb ID validation failed: $imdb_id"
+        # Rate limiting
+        sleep 0.5
+        return 1
+    fi
+
+    # Extract metadata from OMDb response
+    local verified_imdb_id=$(echo "$response" | grep -oE '"imdbID":"tt[0-9]+"' | cut -d'"' -f4)
+    local title=$(echo "$response" | grep -oE '"Title":"[^"]*"' | cut -d'"' -f4)
+    local plot=$(echo "$response" | grep -oE '"Plot":"[^"]*"' | cut -d'"' -f4)
+    local director=$(echo "$response" | grep -oE '"Director":"[^"]*"' | cut -d'"' -f4)
+    local genre=$(echo "$response" | grep -oE '"Genre":"[^"]*"' | cut -d'"' -f4)
+    local runtime=$(echo "$response" | grep -oE '"Runtime":"[^"]*"' | cut -d'"' -f4)
+    local rating=$(echo "$response" | grep -oE '"Rated":"[^"]*"' | cut -d'"' -f4)
+    local released=$(echo "$response" | grep -oE '"Released":"[^"]*"' | cut -d'"' -f4)
+
+    debug "IMDb ID validated: $verified_imdb_id - $title"
+
+    # Output structured metadata
+    echo "IMDB:${verified_imdb_id}"
+    [[ -n "$plot" && "$plot" != "N/A" ]] && echo "PLOT:${plot}"
+    [[ -n "$director" && "$director" != "N/A" ]] && echo "DIRECTOR:${director}"
+    [[ -n "$genre" && "$genre" != "N/A" ]] && echo "GENRE:${genre}"
+    [[ -n "$runtime" && "$runtime" != "N/A" ]] && echo "RUNTIME:${runtime}"
+    [[ -n "$rating" && "$rating" != "N/A" ]] && echo "RATING:${rating}"
+    [[ -n "$released" && "$released" != "N/A" ]] && echo "PREMIERED:${released}"
+
+    # Rate limiting: sleep after each OMDB API call
+    sleep 0.5
+    return 0
 }
 
 # Get IMDb ID from ddgr web search (Sprint 2)
@@ -1399,7 +1472,31 @@ process_movie() {
     local omdb_premiered=""
 
     # 1. Check directory name for IMDb ID
-    imdb_id="$(get_imdb_from_dirname "$movie_basename")" && imdb_source="dirname" || true
+    imdb_id="$(get_imdb_from_dirname "$movie_basename")" && {
+        imdb_source="dirname"
+        debug "Found IMDb ID in dirname: $imdb_id, validating and enriching metadata..."
+
+        # Validate and enrich with OMDb metadata
+        local validation_response
+        validation_response="$(validate_imdb_id "$imdb_id")" && {
+            # Parse validation response for metadata
+            while IFS= read -r line; do
+                case "$line" in
+                    PLOT:*) omdb_plot="${line#PLOT:}" ;;
+                    DIRECTOR:*) omdb_director="${line#DIRECTOR:}" ;;
+                    GENRE:*) omdb_genre="${line#GENRE:}" ;;
+                    RUNTIME:*) omdb_runtime="${line#RUNTIME:}" ;;
+                    RATING:*) omdb_rating="${line#RATING:}" ;;
+                    PREMIERED:*) omdb_premiered="${line#PREMIERED:}" ;;
+                esac
+            done <<< "$validation_response"
+            debug "IMDb ID validated and enriched with OMDb metadata"
+        } || {
+            warn "IMDb ID in dirname failed validation: $imdb_id"
+            imdb_id=""
+            imdb_source=""
+        }
+    } || true
 
     # 2. Check .nfo file (returns structured metadata)
     if [[ -z "$imdb_id" ]]; then
@@ -1442,7 +1539,31 @@ process_movie() {
 
     # 3. Check manual mapping file
     if [[ -z "$imdb_id" ]]; then
-        imdb_id="$(get_imdb_from_mapping "$movie_name")" && imdb_source="mapping" || true
+        imdb_id="$(get_imdb_from_mapping "$movie_name")" && {
+            imdb_source="mapping"
+            debug "Found IMDb ID in mapping file: $imdb_id, validating and enriching metadata..."
+
+            # Validate and enrich with OMDb metadata
+            local validation_response
+            validation_response="$(validate_imdb_id "$imdb_id")" && {
+                # Parse validation response for metadata
+                while IFS= read -r line; do
+                    case "$line" in
+                        PLOT:*) omdb_plot="${line#PLOT:}" ;;
+                        DIRECTOR:*) omdb_director="${line#DIRECTOR:}" ;;
+                        GENRE:*) omdb_genre="${line#GENRE:}" ;;
+                        RUNTIME:*) omdb_runtime="${line#RUNTIME:}" ;;
+                        RATING:*) omdb_rating="${line#RATING:}" ;;
+                        PREMIERED:*) omdb_premiered="${line#PREMIERED:}" ;;
+                    esac
+                done <<< "$validation_response"
+                debug "IMDb ID validated and enriched with OMDb metadata"
+            } || {
+                warn "IMDb ID in mapping file failed validation: $imdb_id"
+                imdb_id=""
+                imdb_source=""
+            }
+        } || true
     fi
 
     # 4. Try OMDb API (returns structured metadata) - skip if we have complete NFO cache
