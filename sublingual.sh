@@ -378,11 +378,11 @@ save_api_state() {
 check_api_limit() {
     local current_count=$(load_api_state)
 
-    if [[ $current_count -ge $API_LIMIT ]]; then
+    if [[ $current_count -ge $API_BUDGET_LIMIT ]]; then
         local today=$(date +%Y-%m-%d)
         error "=================================================="
-        error "Daily API limit reached: $current_count/$API_LIMIT calls used today ($today)"
-        error "The script will pause until tomorrow to respect API limits."
+        error "API budget limit reached: $current_count/$API_LIMIT calls used today ($today)"
+        error "Stopping at $API_BUDGET_LIMIT to preserve safety buffer."
         error "=================================================="
         error ""
         error "Options:"
@@ -390,7 +390,7 @@ check_api_limit() {
         error "  2. Manually reset counter: rm $API_STATE_FILE"
         error "  3. Use a different API key with higher limits"
         error ""
-        fatal "Exiting due to API limit. Resume tomorrow or reset manually."
+        fatal "Exiting due to API budget limit. Resume tomorrow or reset manually."
     fi
 
     return 0
