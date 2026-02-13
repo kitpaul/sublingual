@@ -27,6 +27,7 @@ WORKERS=4
 RENAME="true"
 DRY_RUN="false"
 SURVEY_MODE="false"
+FIX_NAMES="false"
 
 # Statistics tracking
 STATS_IMDB_SUCCESS=0
@@ -74,6 +75,21 @@ url_encode() {
         encoded+="${o}"
     done
     echo "${encoded}"
+}
+
+# Extract a value from a JSON string by key name
+# Handles escaped quotes inside values (e.g. "known as \"The Godfather\"")
+json_extract() {
+    local key="$1"
+    local json="$2"
+    local placeholder="__SUBLINGUAL_EQ__"
+    # Replace escaped quotes (\") with a placeholder so simple extraction works
+    local safe="${json//\\\"/$placeholder}"
+    # Extract value using simple quote matching (now safe from escaped quotes)
+    local value
+    value=$(echo "$safe" | grep -oE "\"${key}\":\"[^\"]*\"" | head -1 | cut -d'"' -f4)
+    # Restore escaped quotes as literal quotes in the output
+    echo "${value//$placeholder/\"}"
 }
 
 # Safe temporary file creation
@@ -269,24 +285,37 @@ show_dependency_status() {
     return 0
 }
 
+# Require that a flag's value argument is present
+require_arg() {
+    local flag="$1"
+    local remaining="$2"
+    if [[ $remaining -lt 2 ]]; then
+        fatal "$flag requires a value"
+    fi
+}
+
 # Parse command line arguments
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --folder)
+                require_arg "$1" "$#"
                 MOVIE_DIR="$2"
                 shift 2
                 ;;
             --language)
+                require_arg "$1" "$#"
                 LANGUAGES="$2"
                 shift 2
                 ;;
             --pause)
+                require_arg "$1" "$#"
                 validate_positive_integer "$2" "--pause"
                 PAUSE="$2"
                 shift 2
                 ;;
             --omdb-key)
+                require_arg "$1" "$#"
                 OMDB_KEY="$2"  # Will override env var or hardcoded key
                 shift 2
                 ;;
@@ -306,7 +335,12 @@ parse_args() {
                 SURVEY_MODE="true"
                 shift
                 ;;
+            --fix-names)
+                FIX_NAMES="true"
+                shift
+                ;;
             --workers)
+                require_arg "$1" "$#"
                 validate_positive_integer "$2" "--workers"
                 WORKERS="$2"
                 shift 2
@@ -351,13 +385,13 @@ load_api_state() {
         local state_date=$(head -1 "$API_STATE_FILE" 2>/dev/null || echo "")
         local state_count=$(tail -1 "$API_STATE_FILE" 2>/dev/null || echo "0")
 
-        local today=$(date +%Y-%m-%d)
+        local today=$(date -u +%Y-%m-%d)
 
-        # If state is from today, return the count
+        # If state is from today (UTC), return the count
         if [[ "$state_date" == "$today" ]]; then
             echo "$state_count"
         else
-            # Different day, reset count
+            # Different UTC day, reset count
             echo "0"
         fi
     else
@@ -367,21 +401,21 @@ load_api_state() {
 
 save_api_state() {
     local count="$1"
-    local today=$(date +%Y-%m-%d)
+    local today=$(date -u +%Y-%m-%d)
 
     echo "$today" > "$API_STATE_FILE"
     echo "$count" >> "$API_STATE_FILE"
 
-    debug "API state saved: $count calls on $today"
+    debug "API state saved: $count calls on $today (UTC)"
 }
 
 check_api_limit() {
     local current_count=$(load_api_state)
 
     if [[ $current_count -ge $API_BUDGET_LIMIT ]]; then
-        local today=$(date +%Y-%m-%d)
+        local today=$(date -u +%Y-%m-%d)
         error "=================================================="
-        error "API budget limit reached: $current_count/$API_LIMIT calls used today ($today)"
+        error "API budget limit reached: $current_count/$API_LIMIT calls used today UTC ($today)"
         error "Stopping at $API_BUDGET_LIMIT to preserve safety buffer."
         error "=================================================="
         error ""
@@ -639,6 +673,16 @@ get_imdb_from_nfo() {
     return 0
 }
 
+# Escape special characters for safe XML embedding
+xml_escape() {
+    local text="$1"
+    text="${text//&/&amp;}"
+    text="${text//</&lt;}"
+    text="${text//>/&gt;}"
+    text="${text//\"/&quot;}"
+    echo "$text"
+}
+
 # Validate cache data
 validate_cache_data() {
     local imdb_id="$1"
@@ -750,6 +794,16 @@ write_nfo_cache() {
     # Create timestamp
     local timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+    # Escape user-supplied data for safe XML embedding
+    local safe_name=$(xml_escape "$movie_name")
+    local safe_plot=$(xml_escape "$plot")
+    local safe_director=$(xml_escape "$director")
+    local safe_genre=$(xml_escape "$genre")
+    local safe_runtime=$(xml_escape "$runtime")
+    local safe_rating=$(xml_escape "$rating")
+    local safe_premiered=$(xml_escape "$premiered")
+    local safe_source=$(xml_escape "$imdb_source")
+
     # Build NFO content
     local nfo_content=""
 
@@ -757,32 +811,32 @@ write_nfo_cache() {
         # Create new NFO file
         nfo_content="<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
 <movie>
-  <title>${movie_name}</title>"
+  <title>${safe_name}</title>"
 
         [[ -n "$movie_year" ]] && nfo_content+="
   <year>${movie_year}</year>"
 
         [[ -n "$premiered" ]] && nfo_content+="
-  <premiered>${premiered}</premiered>"
+  <premiered>${safe_premiered}</premiered>"
 
         [[ -n "$plot" ]] && nfo_content+="
-  <plot>${plot}</plot>"
+  <plot>${safe_plot}</plot>"
 
         [[ -n "$director" ]] && nfo_content+="
-  <director>${director}</director>"
+  <director>${safe_director}</director>"
 
         [[ -n "$genre" ]] && nfo_content+="
-  <genre>${genre}</genre>"
+  <genre>${safe_genre}</genre>"
 
         [[ -n "$runtime" ]] && nfo_content+="
-  <runtime>${runtime}</runtime>"
+  <runtime>${safe_runtime}</runtime>"
 
         [[ -n "$rating" ]] && nfo_content+="
-  <mpaa>${rating}</mpaa>"
+  <mpaa>${safe_rating}</mpaa>"
 
         nfo_content+="
   <uniqueid type=\"imdb\">${imdb_id}</uniqueid>
-  <sublingual version=\"${SCRIPT_VERSION}\" source=\"${imdb_source}\" cached=\"${timestamp}\"/>
+  <sublingual version=\"${SCRIPT_VERSION}\" source=\"${safe_source}\" cached=\"${timestamp}\"/>
 </movie>"
 
         # Write new NFO
@@ -795,20 +849,20 @@ write_nfo_cache() {
             # Build insert content with all available metadata
             local insert_content=""
 
-            [[ -n "$premiered" ]] && insert_content+="  <premiered>${premiered}</premiered>
+            [[ -n "$premiered" ]] && insert_content+="  <premiered>${safe_premiered}</premiered>
 "
-            [[ -n "$plot" ]] && insert_content+="  <plot>${plot}</plot>
+            [[ -n "$plot" ]] && insert_content+="  <plot>${safe_plot}</plot>
 "
-            [[ -n "$director" ]] && insert_content+="  <director>${director}</director>
+            [[ -n "$director" ]] && insert_content+="  <director>${safe_director}</director>
 "
-            [[ -n "$genre" ]] && insert_content+="  <genre>${genre}</genre>
+            [[ -n "$genre" ]] && insert_content+="  <genre>${safe_genre}</genre>
 "
-            [[ -n "$runtime" ]] && insert_content+="  <runtime>${runtime}</runtime>
+            [[ -n "$runtime" ]] && insert_content+="  <runtime>${safe_runtime}</runtime>
 "
-            [[ -n "$rating" ]] && insert_content+="  <mpaa>${rating}</mpaa>
+            [[ -n "$rating" ]] && insert_content+="  <mpaa>${safe_rating}</mpaa>
 "
             insert_content+="  <uniqueid type=\"imdb\">${imdb_id}</uniqueid>
-  <sublingual version=\"${SCRIPT_VERSION}\" source=\"${imdb_source}\" cached=\"${timestamp}\"/>"
+  <sublingual version=\"${SCRIPT_VERSION}\" source=\"${safe_source}\" cached=\"${timestamp}\"/>"
 
             # Use sed to insert before </movie> tag
             sed -i.bak "/<\/movie>/i\\
@@ -838,12 +892,12 @@ get_imdb_from_mapping() {
 
     debug "Checking manual mapping file for: $movie_name"
 
-    # Case-insensitive grep for movie name
-    local imdb_id=$(grep -i "^${movie_name}|" "$IMDB_MAPPING_FILE" | cut -d'|' -f2 | head -1)
+    # Case-insensitive fixed-string grep for movie name (no regex interpretation)
+    local imdb_id=$(grep -iF "${movie_name}|" "$IMDB_MAPPING_FILE" | head -1 | cut -d'|' -f2)
 
     if [[ -z "$imdb_id" ]]; then
         # Try partial match if exact match fails
-        imdb_id=$(grep -i "${movie_name}" "$IMDB_MAPPING_FILE" | cut -d'|' -f2 | head -1)
+        imdb_id=$(grep -iF "${movie_name}" "$IMDB_MAPPING_FILE" | head -1 | cut -d'|' -f2)
     fi
 
     if [[ -n "$imdb_id" ]]; then
@@ -897,13 +951,13 @@ get_imdb_from_omdb() {
 
     if [[ -n "$imdb_id" ]]; then
         # Extract additional metadata from OMDb response
-        local response_title=$(echo "$response" | grep -oE '"Title":"[^"]*"' | cut -d'"' -f4)
-        local plot=$(echo "$response" | grep -oE '"Plot":"[^"]*"' | cut -d'"' -f4)
-        local director=$(echo "$response" | grep -oE '"Director":"[^"]*"' | cut -d'"' -f4)
-        local genre=$(echo "$response" | grep -oE '"Genre":"[^"]*"' | cut -d'"' -f4)
-        local runtime=$(echo "$response" | grep -oE '"Runtime":"[^"]*"' | cut -d'"' -f4)
-        local rating=$(echo "$response" | grep -oE '"Rated":"[^"]*"' | cut -d'"' -f4)
-        local released=$(echo "$response" | grep -oE '"Released":"[^"]*"' | cut -d'"' -f4)
+        local response_title=$(json_extract "Title" "$response")
+        local plot=$(json_extract "Plot" "$response")
+        local director=$(json_extract "Director" "$response")
+        local genre=$(json_extract "Genre" "$response")
+        local runtime=$(json_extract "Runtime" "$response")
+        local rating=$(json_extract "Rated" "$response")
+        local released=$(json_extract "Released" "$response")
 
         # Check for title mismatch
         if [[ -n "$response_title" ]]; then
@@ -945,14 +999,14 @@ get_imdb_from_omdb() {
 
         if [[ -n "$imdb_id" ]]; then
             # Extract additional metadata from OMDb response
-            local response_title=$(echo "$response" | grep -oE '"Title":"[^"]*"' | cut -d'"' -f4)
-            local response_year=$(echo "$response" | grep -oE '"Year":"[^"]*"' | cut -d'"' -f4)
-            local plot=$(echo "$response" | grep -oE '"Plot":"[^"]*"' | cut -d'"' -f4)
-            local director=$(echo "$response" | grep -oE '"Director":"[^"]*"' | cut -d'"' -f4)
-            local genre=$(echo "$response" | grep -oE '"Genre":"[^"]*"' | cut -d'"' -f4)
-            local runtime=$(echo "$response" | grep -oE '"Runtime":"[^"]*"' | cut -d'"' -f4)
-            local rating=$(echo "$response" | grep -oE '"Rated":"[^"]*"' | cut -d'"' -f4)
-            local released=$(echo "$response" | grep -oE '"Released":"[^"]*"' | cut -d'"' -f4)
+            local response_title=$(json_extract "Title" "$response")
+            local response_year=$(json_extract "Year" "$response")
+            local plot=$(json_extract "Plot" "$response")
+            local director=$(json_extract "Director" "$response")
+            local genre=$(json_extract "Genre" "$response")
+            local runtime=$(json_extract "Runtime" "$response")
+            local rating=$(json_extract "Rated" "$response")
+            local released=$(json_extract "Released" "$response")
 
             # Check for title/year mismatch
             if [[ -n "$response_title" ]]; then
@@ -1025,7 +1079,7 @@ validate_imdb_id() {
     debug "OMDb validation response (first 200 chars): ${response:0:200}"
 
     # Check if response is valid
-    local response_status=$(echo "$response" | grep -oE '"Response":"[^"]*"' | cut -d'"' -f4)
+    local response_status=$(json_extract "Response" "$response")
 
     if [[ "$response_status" != "True" ]]; then
         debug "IMDb ID validation failed: $imdb_id"
@@ -1036,13 +1090,13 @@ validate_imdb_id() {
 
     # Extract metadata from OMDb response
     local verified_imdb_id=$(echo "$response" | grep -oE '"imdbID":"tt[0-9]+"' | cut -d'"' -f4)
-    local title=$(echo "$response" | grep -oE '"Title":"[^"]*"' | cut -d'"' -f4)
-    local plot=$(echo "$response" | grep -oE '"Plot":"[^"]*"' | cut -d'"' -f4)
-    local director=$(echo "$response" | grep -oE '"Director":"[^"]*"' | cut -d'"' -f4)
-    local genre=$(echo "$response" | grep -oE '"Genre":"[^"]*"' | cut -d'"' -f4)
-    local runtime=$(echo "$response" | grep -oE '"Runtime":"[^"]*"' | cut -d'"' -f4)
-    local rating=$(echo "$response" | grep -oE '"Rated":"[^"]*"' | cut -d'"' -f4)
-    local released=$(echo "$response" | grep -oE '"Released":"[^"]*"' | cut -d'"' -f4)
+    local title=$(json_extract "Title" "$response")
+    local plot=$(json_extract "Plot" "$response")
+    local director=$(json_extract "Director" "$response")
+    local genre=$(json_extract "Genre" "$response")
+    local runtime=$(json_extract "Runtime" "$response")
+    local rating=$(json_extract "Rated" "$response")
+    local released=$(json_extract "Released" "$response")
 
     debug "IMDb ID validated: $verified_imdb_id - $title"
 
@@ -1732,14 +1786,30 @@ rename_subtitles() {
     local movie_dir="$1"
     local language="$2"
     local marker_file="$3"
-    local movie_name="${4:-Movie}"
-    local resolution="${5:-Unknown}"
-    local movie_year="${6:-}"
+    # Args 4-6 (movie_name, resolution, year) kept for backward compat but no longer used for naming
+    # Subtitle names are now derived from the actual video filename for media server compatibility
 
     # Dry-run mode: skip renaming
     if [[ "$DRY_RUN" == "true" ]]; then
         debug "DRY-RUN: Would rename subtitles in $movie_dir"
         return 0
+    fi
+
+    # Derive subtitle base name from the actual video file
+    # This ensures subtitle filenames match the video for auto-association in
+    # Kodi, Plex, Jellyfin, Synology Video Station, Sonarr/Radarr, and Bazarr
+    local video_file
+    video_file=$(find "$movie_dir" -maxdepth 1 -type f \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit 2>/dev/null)
+
+    local video_base=""
+    if [[ -n "$video_file" ]]; then
+        local video_basename
+        video_basename=$(basename "$video_file")
+        video_base="${video_basename%.*}"
+        debug "Subtitle base name from video file: $video_base"
+    else
+        warn "No video file found in $movie_dir, skipping rename"
+        return
     fi
 
     # Find new subtitle files (all formats)
@@ -1754,18 +1824,8 @@ rename_subtitles() {
         return
     fi
 
-    # Format language
+    # Format language (ISO 639-1 two-letter code, lowercase)
     local lang_lower=$(echo "$language" | tr '[:upper:]' '[:lower:]')
-    local lang_title=$(echo "$lang_lower" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')
-
-    # Format resolution
-    if [[ -n "$resolution" ]]; then
-        resolution="[${resolution}]"
-    else
-        # Check if we should keep original resolution from subtitle filename
-        # or default to [Unknown]
-        resolution="[Unknown]"
-    fi
 
     # Validate and filter subtitle files before renaming
     local valid_files=()
@@ -1801,40 +1861,42 @@ rename_subtitles() {
 
     debug "Validated ${#new_files[@]} subtitle files"
 
-    # Rename files
+    # Rename files using universal pattern: VideoName.lang.ext
+    # Multiple subs for the same language get a numeric suffix: VideoName.lang2.ext
     local counter=1
     for file in "${new_files[@]}"; do
         # Get file extension
         local ext="${file##*.}"
 
-        # Skip already renamed files
-        if [[ "$(basename "$file")" =~ \.[a-z]{2}\.[A-Z][a-z]+[0-9]+\. ]]; then
-            continue
+        # Skip files that already match our naming pattern
+        if [[ "$(basename "$file")" == "${video_base}."* ]]; then
+            # Already starts with video base name — check if it has a language tag
+            local remainder="${file##*${video_base}.}"
+            if [[ "$remainder" =~ ^[a-z]{2}[0-9]*\. ]]; then
+                debug "   Already renamed: $(basename "$file")"
+                continue
+            fi
         fi
 
-        # Try to preserve resolution from original subtitle filename if movie doesn't have it
-        local use_resolution="$resolution"
-        if [[ "$resolution" == "[Unknown]" ]] && [[ "$(basename "$file")" =~ \[([0-9]+p)\] ]]; then
-            use_resolution="[${BASH_REMATCH[1]}]"
-            debug "Preserving resolution from subtitle: $use_resolution"
-        fi
-
-        # Build subtitle name with year if available
+        # Build subtitle name: VideoName.lang.ext or VideoName.lang2.ext for multiples
         local new_name
-        if [[ -n "$movie_year" ]]; then
-            new_name="${movie_name} (${movie_year}) ${use_resolution}.${lang_lower}.${lang_title}${counter}.${ext}"
+        if [[ $counter -eq 1 ]]; then
+            new_name="${video_base}.${lang_lower}.${ext}"
         else
-            new_name="${movie_name} ${use_resolution}.${lang_lower}.${lang_title}${counter}.${ext}"
+            new_name="${video_base}.${lang_lower}${counter}.${ext}"
         fi
         local new_path="${movie_dir}/${new_name}"
 
-        if [[ ! -f "$new_path" ]]; then
-            if mv "$file" "$new_path" 2>/dev/null; then
-                info "   Renamed: $(basename "$file") -> $new_name"
-                ((counter++))
-            fi
-        else
-            debug "   Skipped rename (target exists): $(basename "$file")"
+        # If target exists, increment counter and retry
+        while [[ -f "$new_path" ]]; do
+            ((counter++))
+            new_name="${video_base}.${lang_lower}${counter}.${ext}"
+            new_path="${movie_dir}/${new_name}"
+        done
+
+        if mv "$file" "$new_path" 2>/dev/null; then
+            info "   Renamed: $(basename "$file") -> $new_name"
+            ((counter++))
         fi
     done
 }
@@ -1942,17 +2004,17 @@ clear_progress() {
     printf "\r%-80s\r" "" >&2
 }
 
-# Calculate seconds until midnight (API quota reset)
-seconds_until_midnight() {
+# Calculate seconds until midnight UTC (OMDb API quota reset)
+seconds_until_midnight_utc() {
     local current_epoch=$(date +%s)
-    local current_date=$(date +%Y-%m-%d)
-    # Get tomorrow's date at 00:00:00
-    local tomorrow_midnight=$(date -j -f "%Y-%m-%d %H:%M:%S" "${current_date} 23:59:59" +%s 2>/dev/null)
-    if [[ -z "$tomorrow_midnight" ]]; then
-        # Fallback for systems without -j flag
-        tomorrow_midnight=$(date -d "tomorrow 00:00:00" +%s 2>/dev/null || echo $((current_epoch + 86400)))
-    fi
-    local seconds_remaining=$((tomorrow_midnight - current_epoch + 1))
+    # Current UTC time components
+    local utc_hour=$(date -u +%H)
+    local utc_min=$(date -u +%M)
+    local utc_sec=$(date -u +%S)
+    # Seconds elapsed today in UTC
+    local elapsed=$(( 10#$utc_hour * 3600 + 10#$utc_min * 60 + 10#$utc_sec ))
+    # Seconds remaining until midnight UTC
+    local seconds_remaining=$(( 86400 - elapsed ))
     echo "$seconds_remaining"
 }
 
@@ -1967,8 +2029,11 @@ format_time() {
 
 # Countdown display until API budget resets
 wait_for_api_reset() {
-    local remaining_seconds=$(seconds_until_midnight)
-    local reset_time=$(date -v+1d +"%Y-%m-%d 00:00:00" 2>/dev/null || date -d "tomorrow" +"%Y-%m-%d 00:00:00" 2>/dev/null)
+    local remaining_seconds=$(seconds_until_midnight_utc)
+    local reset_time
+    # Calculate next midnight UTC as a displayable time
+    local next_utc_date=$(date -u -v+1d +"%Y-%m-%d" 2>/dev/null || date -u -d "tomorrow" +"%Y-%m-%d" 2>/dev/null)
+    reset_time="${next_utc_date:-tomorrow} 00:00:00 UTC"
 
     warn ""
     warn "=================================================="
@@ -1998,6 +2063,223 @@ wait_for_api_reset() {
     sleep 2
 }
 
+# Fix subtitle filenames to match the video file (for media server compatibility)
+# Renames old-pattern subtitles like "Movie (2024) [1080p].en.En1.srt"
+# to match the video: "Movie [1080p].en.srt"
+fix_subtitle_names() {
+    local movie_dir="$1"
+
+    local movie_basename
+    movie_basename=$(basename "$movie_dir")
+
+    # Find all video files
+    local video_files=()
+    while IFS= read -r -d '' vf; do
+        video_files+=("$vf")
+    done < <(find "$movie_dir" -maxdepth 1 -type f \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print0 2>/dev/null)
+
+    if [[ ${#video_files[@]} -eq 0 ]]; then
+        debug "No video file in: $movie_basename"
+        return
+    fi
+
+    # Find all subtitle files in directory first (needed for video selection)
+    local sub_files=()
+    while IFS= read -r -d '' file; do
+        sub_files+=("$file")
+    done < <(find "$movie_dir" -maxdepth 1 -type f \( -iname "*.srt" -o -iname "*.sub" -o -iname "*.ass" -o -iname "*.ssa" -o -iname "*.vtt" \) -print0 2>/dev/null)
+
+    if [[ ${#sub_files[@]} -eq 0 ]]; then
+        return
+    fi
+
+    # Select the best video file: score each by how many existing subtitles
+    # start with its base name. This picks the video that subs were created for.
+    local video_file="${video_files[0]}"
+    if [[ ${#video_files[@]} -gt 1 ]]; then
+        local best_score=0
+        for vf in "${video_files[@]}"; do
+            local vf_name
+            vf_name=$(basename "$vf")
+            local vf_base="${vf_name%.*}"
+            local score=0
+            for sf in "${sub_files[@]}"; do
+                local sf_name
+                sf_name=$(basename "$sf")
+                if [[ "$sf_name" == "${vf_base}."* ]]; then
+                    ((score++))
+                fi
+            done
+            if [[ $score -gt $best_score ]]; then
+                best_score=$score
+                video_file="$vf"
+            fi
+        done
+        # If no subs match any video by prefix, try matching resolution tags
+        # e.g. subtitle "Movie (2025) [1080p].en.srt" contains "[1080p]"
+        #      which matches video "Movie [1080p].mp4"
+        if [[ $best_score -eq 0 ]]; then
+            for vf in "${video_files[@]}"; do
+                local vf_name
+                vf_name=$(basename "$vf")
+                # Extract resolution tags like [1080p], [2160p], [720p], [4K]
+                local res_tag=""
+                if [[ "$vf_name" =~ \[([0-9]+p|4K)\] ]]; then
+                    res_tag="${BASH_REMATCH[0]}"
+                fi
+                if [[ -n "$res_tag" ]]; then
+                    local res_score=0
+                    for sf in "${sub_files[@]}"; do
+                        local sf_name
+                        sf_name=$(basename "$sf")
+                        if [[ "$sf_name" == *"$res_tag"* ]]; then
+                            ((res_score++))
+                        fi
+                    done
+                    if [[ $res_score -gt $best_score ]]; then
+                        best_score=$res_score
+                        video_file="$vf"
+                    fi
+                fi
+            done
+        fi
+    fi
+
+    local video_basename_full
+    video_basename_full=$(basename "$video_file")
+    local video_base="${video_basename_full%.*}"
+
+    debug "   Video file: $video_basename_full"
+
+    local fixed_count=0
+    local skipped_count=0
+    # Track planned target names for dry-run collision detection
+    local planned_names=""
+
+    for sub_file in "${sub_files[@]}"; do
+        local sub_name
+        sub_name=$(basename "$sub_file")
+        local sub_ext="${sub_name##*.}"
+
+        # Already matches video base — skip
+        if [[ "$sub_name" == "${video_base}."* ]]; then
+            debug "   OK: $sub_name"
+            ((skipped_count++))
+            continue
+        fi
+
+        # Extract language code from the subtitle filename
+        # Matches patterns like: .en.En1.srt, .fr.Fr1.srt, .en.srt, .1.en.srt
+        local lang_code=""
+        if [[ "$sub_name" =~ \.([a-z]{2})\.[A-Z][a-z]+[0-9]*\.[a-zA-Z]+$ ]]; then
+            # Old Sublingual pattern: .en.En1.srt or .en.En.srt
+            lang_code="${BASH_REMATCH[1]}"
+        elif [[ "$sub_name" =~ \.([0-9]+)\.([a-z]{2})\.[a-zA-Z]+$ ]]; then
+            # Numbered pattern: .1.en.srt
+            lang_code="${BASH_REMATCH[2]}"
+        elif [[ "$sub_name" =~ \.([a-z]{2})\.[a-zA-Z]+$ ]]; then
+            # Simple pattern: .en.srt
+            lang_code="${BASH_REMATCH[1]}"
+        elif [[ "$sub_name" =~ \.([a-z]{2})[0-9]*\.[a-zA-Z]+$ ]]; then
+            # Compact pattern: .en2.srt
+            lang_code="${BASH_REMATCH[1]}"
+        fi
+
+        if [[ -z "$lang_code" ]]; then
+            warn "   Cannot detect language in: $sub_name (skipping)"
+            continue
+        fi
+
+        # Build new filename: VideoBase.lang.ext (with collision handling)
+        local new_name="${video_base}.${lang_code}.${sub_ext}"
+        local new_path="${movie_dir}/${new_name}"
+        local counter=2
+
+        while [[ -f "$new_path" ]] || echo "$planned_names" | grep -qF "|${new_name}|"; do
+            # Check if existing file is identical (same content)
+            if [[ -f "$new_path" ]] && command -v md5 &>/dev/null; then
+                local new_hash=$(md5 -q "$sub_file" 2>/dev/null)
+                local exist_hash=$(md5 -q "$new_path" 2>/dev/null)
+                if [[ "$new_hash" == "$exist_hash" ]]; then
+                    if [[ "$DRY_RUN" == "true" ]]; then
+                        info "   DRY-RUN: Would remove duplicate: $sub_name (same as $new_name)"
+                    else
+                        rm -f "$sub_file"
+                        info "   Removed duplicate: $sub_name (same as $new_name)"
+                    fi
+                    ((fixed_count++))
+                    continue 2  # skip to next subtitle file
+                fi
+            fi
+            new_name="${video_base}.${lang_code}${counter}.${sub_ext}"
+            new_path="${movie_dir}/${new_name}"
+            ((counter++))
+        done
+
+        # Track this name for dry-run collision detection
+        planned_names="${planned_names}|${new_name}|"
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+            info "   DRY-RUN: $sub_name -> $new_name"
+        else
+            if mv "$sub_file" "$new_path" 2>/dev/null; then
+                info "   Fixed: $sub_name -> $new_name"
+            else
+                warn "   Failed to rename: $sub_name"
+            fi
+        fi
+        ((fixed_count++))
+    done
+
+    if [[ $fixed_count -gt 0 ]]; then
+        info "   [$movie_basename] Fixed $fixed_count subtitle(s), $skipped_count already correct"
+    fi
+}
+
+# Run --fix-names across all movie directories
+run_fix_names() {
+    info "Scanning for movie directories..."
+    local all_dirs=()
+    local scan_count=0
+
+    # Check if path itself contains videos
+    if find "${MOVIE_DIR}" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
+        all_dirs+=("${MOVIE_DIR}")
+    else
+        while IFS= read -r -d '' dir; do
+            if find "$dir" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
+                all_dirs+=("$dir")
+                ((scan_count++))
+                if (( scan_count % 10 == 0 )); then
+                    show_scan_progress "$scan_count"
+                fi
+            fi
+        done < <(find "${MOVIE_DIR}" -mindepth 1 -type d -print0)
+    fi
+
+    clear_progress
+    info "Found ${#all_dirs[@]} movie directories"
+    info ""
+
+    local total_fixed=0
+    local dir_count=0
+    for dir in "${all_dirs[@]}"; do
+        ((dir_count++))
+        if (( dir_count % 50 == 0 )); then
+            info "Progress: $dir_count/${#all_dirs[@]} directories..."
+        fi
+        fix_subtitle_names "$dir"
+    done
+
+    info ""
+    info "=================================================="
+    info "Fix-names complete: scanned ${#all_dirs[@]} directories"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        info "(Dry-run mode — no files were actually renamed)"
+    fi
+    info "=================================================="
+}
+
 # Main function
 main() {
     check_dependencies
@@ -2005,6 +2287,18 @@ main() {
     parse_args "$@"
 
     info "Sublingual v${SCRIPT_VERSION} starting..."
+
+    # --fix-names: rename subtitles to match video files, then exit
+    # No API key needed — this is a local-only operation
+    if [[ "$FIX_NAMES" == "true" ]]; then
+        info "Mode: Fix subtitle filenames"
+        info "  Movie dir: ${MOVIE_DIR}"
+        info "  Dry-run: ${DRY_RUN}"
+        info ""
+        run_fix_names
+        exit 0
+    fi
+
     info "Configuration:"
     info "  Movie dir: ${MOVIE_DIR}"
     info "  Languages: ${LANGUAGES}"
@@ -2048,125 +2342,125 @@ main() {
             info "=================================================="
         fi
 
-    # Find all movie directories
-    info ""
-    info "Scanning for movie directories..."
-    local all_dirs=()
-    local scan_count=0
+        # Find all movie directories
+        info ""
+        info "Scanning for movie directories..."
+        local all_dirs=()
+        local scan_count=0
 
-    # First check if the provided path itself contains videos
-    if find "${MOVIE_DIR}" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
-        all_dirs+=("${MOVIE_DIR}")
-        ((scan_count++))
-        show_scan_progress "$scan_count"
-    else
-        # Otherwise search subdirectories with progress feedback
-        while IFS= read -r -d '' dir; do
-            if find "$dir" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
-                all_dirs+=("$dir")
-                ((scan_count++))
-                # Show progress every 10 folders to avoid terminal spam
-                if (( scan_count % 10 == 0 )) || [[ $scan_count -eq 1 ]]; then
-                    show_scan_progress "$scan_count"
+        # First check if the provided path itself contains videos
+        if find "${MOVIE_DIR}" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
+            all_dirs+=("${MOVIE_DIR}")
+            ((scan_count++))
+            show_scan_progress "$scan_count"
+        else
+            # Otherwise search subdirectories with progress feedback
+            while IFS= read -r -d '' dir; do
+                if find "$dir" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
+                    all_dirs+=("$dir")
+                    ((scan_count++))
+                    # Show progress every 10 folders to avoid terminal spam
+                    if (( scan_count % 10 == 0 )) || [[ $scan_count -eq 1 ]]; then
+                        show_scan_progress "$scan_count"
+                    fi
                 fi
-            fi
-        done < <(find "${MOVIE_DIR}" -mindepth 1 -type d -print0)
-    fi
+            done < <(find "${MOVIE_DIR}" -mindepth 1 -type d -print0)
+        fi
 
-    clear_progress
-    info "Found ${#all_dirs[@]} movie directories"
+        clear_progress
+        info "Found ${#all_dirs[@]} movie directories"
 
-    # Survey mode: smart prioritization
-    local movie_dirs=()
-    if [[ "$SURVEY_MODE" == "true" ]]; then
-        info "Survey mode: Analyzing folders and building priority queue..."
+        # Survey mode: smart prioritization
+        local movie_dirs=()
+        if [[ "$SURVEY_MODE" == "true" ]]; then
+            info "Survey mode: Analyzing folders and building priority queue..."
 
-        # Priority 1: Folders without NFO (need API calls - limited by quota)
-        local no_nfo_dirs=()
-        # Priority 2: Folders with NFO (0 API calls - unlimited, but network I/O for subtitles)
-        local with_nfo_dirs=()
+            # Priority 1: Folders without NFO (need API calls - limited by quota)
+            local no_nfo_dirs=()
+            # Priority 2: Folders with NFO (0 API calls - unlimited, but network I/O for subtitles)
+            local with_nfo_dirs=()
 
-        local analyzed=0
-        local total_to_analyze=${#all_dirs[@]}
+            local analyzed=0
+            local total_to_analyze=${#all_dirs[@]}
 
-        for dir in "${all_dirs[@]}"; do
-            ((analyzed++))
+            for dir in "${all_dirs[@]}"; do
+                ((analyzed++))
 
-            # Show progress every 10 folders
-            if (( analyzed % 10 == 0 )) || [[ $analyzed -eq 1 ]] || [[ $analyzed -eq $total_to_analyze ]]; then
-                show_progress "$analyzed" "$total_to_analyze" "Analyzing"
-            fi
+                # Show progress every 10 folders
+                if (( analyzed % 10 == 0 )) || [[ $analyzed -eq 1 ]] || [[ $analyzed -eq $total_to_analyze ]]; then
+                    show_progress "$analyzed" "$total_to_analyze" "Analyzing"
+                fi
 
-            # Skip already processed folders
-            if is_folder_processed "$dir"; then
-                debug "Skipping already processed: $(basename "$dir")"
+                # Skip already processed folders
+                if is_folder_processed "$dir"; then
+                    debug "Skipping already processed: $(basename "$dir")"
+                    continue
+                fi
+
+                if has_nfo_file "$dir"; then
+                    with_nfo_dirs+=("$dir")
+                else
+                    no_nfo_dirs+=("$dir")
+                fi
+            done
+
+            clear_progress
+            info "  Priority 1 (no NFO, needs API): ${#no_nfo_dirs[@]} folders"
+            info "  Priority 2 (has NFO, 0 API): ${#with_nfo_dirs[@]} folders"
+
+            # Combine: no-NFO first, then with-NFO
+            movie_dirs=("${no_nfo_dirs[@]}" "${with_nfo_dirs[@]}")
+        else
+            movie_dirs=("${all_dirs[@]}")
+        fi
+
+        # Process each movie/language combination
+        local total_processed=0
+        local total_operations=$((${#movie_dirs[@]} * ${#languages[@]}))
+        local stopped_for_api_budget=false
+
+        # Main processing loop - continues until all movies processed
+        local dir_index=0
+        while [[ $dir_index -lt ${#movie_dirs[@]} ]]; do
+            local dir="${movie_dirs[$dir_index]}"
+
+            # Check API budget in survey mode - wait if needed
+            if [[ "$SURVEY_MODE" == "true" ]] && should_stop_for_api_budget; then
+                stopped_for_api_budget=true
+                # Wait for API quota to reset (countdown display)
+                wait_for_api_reset
+                # After reset, continue processing
+                stopped_for_api_budget=false
+                # Don't increment dir_index - reprocess this directory
                 continue
             fi
 
-            if has_nfo_file "$dir"; then
-                with_nfo_dirs+=("$dir")
-            else
-                no_nfo_dirs+=("$dir")
-            fi
+            for lang in "${languages[@]}"; do
+                ((total_processed++))
+
+                # Progress indicator
+                info "=================================================="
+                if [[ "$SURVEY_MODE" == "true" ]]; then
+                    info "Progress: $total_processed/$total_operations (Survey mode - continuous)"
+                else
+                    info "Progress: $total_processed/$total_operations"
+                fi
+                info "=================================================="
+
+                process_movie "$dir" "$lang"
+
+                # Mark as processed in survey mode
+                if [[ "$SURVEY_MODE" == "true" ]]; then
+                    save_survey_state "$dir"
+                fi
+
+                # Pause between operations
+                sleep "${PAUSE}"
+            done
+
+            # Move to next directory
+            ((dir_index++))
         done
-
-        clear_progress
-        info "  Priority 1 (no NFO, needs API): ${#no_nfo_dirs[@]} folders"
-        info "  Priority 2 (has NFO, 0 API): ${#with_nfo_dirs[@]} folders"
-
-        # Combine: no-NFO first, then with-NFO
-        movie_dirs=("${no_nfo_dirs[@]}" "${with_nfo_dirs[@]}")
-    else
-        movie_dirs=("${all_dirs[@]}")
-    fi
-
-    # Process each movie/language combination
-    local total_processed=0
-    local total_operations=$((${#movie_dirs[@]} * ${#languages[@]}))
-    local stopped_for_api_budget=false
-
-    # Main processing loop - continues until all movies processed
-    local dir_index=0
-    while [[ $dir_index -lt ${#movie_dirs[@]} ]]; do
-        local dir="${movie_dirs[$dir_index]}"
-
-        # Check API budget in survey mode - wait if needed
-        if [[ "$SURVEY_MODE" == "true" ]] && should_stop_for_api_budget; then
-            stopped_for_api_budget=true
-            # Wait for API quota to reset (countdown display)
-            wait_for_api_reset
-            # After reset, continue processing
-            stopped_for_api_budget=false
-            # Don't increment dir_index - reprocess this directory
-            continue
-        fi
-
-        for lang in "${languages[@]}"; do
-            ((total_processed++))
-
-            # Progress indicator
-            info "=================================================="
-            if [[ "$SURVEY_MODE" == "true" ]]; then
-                info "Progress: $total_processed/$total_operations (Survey mode - continuous)"
-            else
-                info "Progress: $total_processed/$total_operations"
-            fi
-            info "=================================================="
-
-            process_movie "$dir" "$lang"
-
-            # Mark as processed in survey mode
-            if [[ "$SURVEY_MODE" == "true" ]]; then
-                save_survey_state "$dir"
-            fi
-
-            # Pause between operations
-            sleep "${PAUSE}"
-        done
-
-        # Move to next directory
-        ((dir_index++))
-    done
 
         info ""
         info "=================================================="
@@ -2214,7 +2508,7 @@ main() {
         # If we used significant API quota, wait until after midnight for fresh quota
         if [[ $current_api_usage -ge 400 ]]; then
             # Calculate seconds until midnight + 5 minute buffer
-            inter_cycle_delay=$(seconds_until_midnight)
+            inter_cycle_delay=$(seconds_until_midnight_utc)
             ((inter_cycle_delay += 300))  # Add 5 minute buffer after midnight
 
             local hours_to_wait=$((inter_cycle_delay / 3600))
@@ -2307,6 +2601,8 @@ OPTIONS
                         Get your free key at: https://www.omdbapi.com/apikey.aspx
     --pause SECONDS     Pause between operations (default: 1)
     --survey            Enable survey mode for continuous monitoring
+    --fix-names         Rename existing subtitles to match video filenames
+                        (for media server compatibility; no API key needed)
     --dry-run           Preview operations without making changes
     --debug             Enable verbose debug logging
     --no-rename         Keep original subtitle filenames
