@@ -367,16 +367,23 @@ parse_args() {
     # Validate language codes
     validate_language_codes "${LANGUAGES}"
 
-    # Debug: show original path
-    debug "Original path: ${MOVIE_DIR}"
+    # Support comma-separated paths: split, validate each, store in array
+    MOVIE_DIRS=()
+    IFS=',' read -ra _raw_dirs <<< "${MOVIE_DIR}"
+    for _dir in "${_raw_dirs[@]}"; do
+        # Trim leading/trailing whitespace
+        _dir="$(echo "$_dir" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        debug "Original path: ${_dir}"
+        _dir="$(validate_path "${_dir}")" || {
+            error "Path validation failed for: ${_dir}"
+            fatal "Invalid directory: ${_dir}"
+        }
+        debug "Validated path: ${_dir}"
+        MOVIE_DIRS+=("$_dir")
+    done
 
-    # Validate and sanitize movie directory
-    MOVIE_DIR="$(validate_path "${MOVIE_DIR}")" || {
-        error "Path validation failed for: ${MOVIE_DIR}"
-        fatal "Invalid directory: ${MOVIE_DIR}"
-    }
-
-    debug "Validated path: ${MOVIE_DIR}"
+    # Keep MOVIE_DIR pointing to the first path for backward compatibility
+    MOVIE_DIR="${MOVIE_DIRS[0]}"
 }
 
 # API rate limiting functions
@@ -2252,20 +2259,22 @@ run_fix_names() {
     local all_dirs=()
     local scan_count=0
 
-    # Check if path itself contains videos
-    if find "${MOVIE_DIR}" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
-        all_dirs+=("${MOVIE_DIR}")
-    else
-        while IFS= read -r -d '' dir; do
-            if find "$dir" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
-                all_dirs+=("$dir")
-                ((scan_count++))
-                if (( scan_count % 10 == 0 )); then
-                    show_scan_progress "$scan_count"
+    for _root in "${MOVIE_DIRS[@]}"; do
+        # Check if path itself contains videos
+        if find "$_root" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
+            all_dirs+=("$_root")
+        else
+            while IFS= read -r -d '' dir; do
+                if find "$dir" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
+                    all_dirs+=("$dir")
+                    ((scan_count++))
+                    if (( scan_count % 10 == 0 )); then
+                        show_scan_progress "$scan_count"
+                    fi
                 fi
-            fi
-        done < <(find "${MOVIE_DIR}" -mindepth 1 -type d -print0)
-    fi
+            done < <(find "$_root" -mindepth 1 -type d -print0)
+        fi
+    done
 
     clear_progress
     info "Found ${#all_dirs[@]} movie directories"
@@ -2302,7 +2311,7 @@ main() {
     # No API key needed — this is a local-only operation
     if [[ "$FIX_NAMES" == "true" ]]; then
         info "Mode: Fix subtitle filenames"
-        info "  Movie dir: ${MOVIE_DIR}"
+        for _d in "${MOVIE_DIRS[@]}"; do info "  Movie dir: ${_d}"; done
         info "  Dry-run: ${DRY_RUN}"
         info ""
         run_fix_names
@@ -2310,7 +2319,7 @@ main() {
     fi
 
     info "Configuration:"
-    info "  Movie dir: ${MOVIE_DIR}"
+    for _d in "${MOVIE_DIRS[@]}"; do info "  Movie dir: ${_d}"; done
     info "  Languages: ${LANGUAGES}"
     info "  OMDB Key: $([ -n "${OMDB_KEY}" ] && echo "Configured" || echo "Not set")"
     info "  Year range: 1920-${CURRENT_YEAR}"
@@ -2358,24 +2367,27 @@ main() {
         local all_dirs=()
         local scan_count=0
 
-        # First check if the provided path itself contains videos
-        if find "${MOVIE_DIR}" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
-            all_dirs+=("${MOVIE_DIR}")
-            ((scan_count++))
-            show_scan_progress "$scan_count"
-        else
-            # Otherwise search subdirectories with progress feedback
-            while IFS= read -r -d '' dir; do
-                if find "$dir" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
-                    all_dirs+=("$dir")
-                    ((scan_count++))
-                    # Show progress every 10 folders to avoid terminal spam
-                    if (( scan_count % 10 == 0 )) || [[ $scan_count -eq 1 ]]; then
-                        show_scan_progress "$scan_count"
+        # Scan all provided paths for movie directories
+        for _root in "${MOVIE_DIRS[@]}"; do
+            # First check if the provided path itself contains videos
+            if find "$_root" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
+                all_dirs+=("$_root")
+                ((scan_count++))
+                show_scan_progress "$scan_count"
+            else
+                # Otherwise search subdirectories with progress feedback
+                while IFS= read -r -d '' dir; do
+                    if find "$dir" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
+                        all_dirs+=("$dir")
+                        ((scan_count++))
+                        # Show progress every 10 folders to avoid terminal spam
+                        if (( scan_count % 10 == 0 )) || [[ $scan_count -eq 1 ]]; then
+                            show_scan_progress "$scan_count"
+                        fi
                     fi
-                fi
-            done < <(find "${MOVIE_DIR}" -mindepth 1 -type d -print0)
-        fi
+                done < <(find "$_root" -mindepth 1 -type d -print0)
+            fi
+        done
 
         clear_progress
         info "Found ${#all_dirs[@]} movie directories"
