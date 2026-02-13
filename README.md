@@ -12,6 +12,8 @@ Sublingual is an intelligent subtitle downloader Bash script for macOS that auto
 - **Survey Mode**: Continuously monitors directories for new movies
 - **Dual Subtitle Sources**: Uses both Subliminal and OpenSubtitles
 - **API Budget Management**: Tracks and limits OMDb API usage (500 calls/day free tier)
+- **Subtitle Name Repair**: Automatically fixes subtitle filenames to match the universal `VideoBase.lang.ext` convention (compatible with Plex, Jellyfin, Kodi, Synology Video Station)
+- **Multi-Drive Support**: Scan multiple directories or drives in a single command with comma-separated paths
 - **Dry-Run Mode**: Test operations without making changes
 - **YTS-Optimized**: Special handling for YTS movie folder formats
 - **macOS Compatible**: Works with macOS bash 3.2 (no bash 4+ required)
@@ -69,6 +71,9 @@ export OMDB_API_KEY='your-api-key-here'
 
 # Batch process entire movie collection
 ./sublingual.sh --folder "/path/to/Movies" --language EN
+
+# Scan multiple drives/directories at once
+./sublingual.sh --folder "/drive1/Movies,/drive2/Movies,/drive3/Movies" --language EN
 ```
 
 ### Advanced Options
@@ -85,6 +90,12 @@ export OMDB_API_KEY='your-api-key-here'
 
 # Debug mode
 ./sublingual.sh --folder "/path/to/Movies" --language EN --debug
+
+# Fix subtitle filenames only (no downloads, no API key needed)
+./sublingual.sh --fix-names --folder "/path/to/Movies"
+
+# Fix names with dry-run preview
+./sublingual.sh --fix-names --dry-run --folder "/path/to/Movies"
 ```
 
 ### Check Dependencies
@@ -115,18 +126,19 @@ Language codes are case-insensitive (en, EN, eN all work).
 
 ## How It Works
 
-1. **Directory Scanning**: Finds all folders containing video files (.mkv, .mp4, .avi)
-2. **IMDb Lookup**: Identifies movies using multiple strategies:
+1. **Directory Scanning**: Finds all folders containing video files (.mkv, .mp4, .avi). Supports comma-separated paths for multi-drive setups.
+2. **Subtitle Name Repair**: Fixes existing subtitle filenames to match the `VideoBase.lang.ext` pattern before downloading, ensuring accurate duplicate detection.
+3. **IMDb Lookup**: Identifies movies using multiple strategies:
    - Parse IMDb ID from directory name (e.g., "Movie (2024) [tt1234567]")
    - Read from existing NFO files
    - Check manual mapping file (`~/.sublingual_imdb_map`)
    - Query OMDb API
    - Web search via ddgr (fallback)
-3. **Subtitle Search**: Queries multiple sources:
+4. **Subtitle Search**: Queries multiple sources:
    - Subliminal (if installed)
    - OpenSubtitles direct API
-4. **Metadata Caching**: Stores movie info in NFO files for future use
-5. **Smart Download**: Skips movies that already have subtitles
+5. **Metadata Caching**: Stores movie info in NFO files for future use
+6. **Smart Download**: Skips movies that already have subtitles
 
 ## Configuration Files
 
@@ -159,6 +171,17 @@ This will continuously monitor the Movies folder and automatically download subt
 ./sublingual.sh --folder "/Movies" --language EN,ES --dry-run
 ```
 
+### Example 5: Fix Subtitle Filenames Across Multiple Drives
+```bash
+./sublingual.sh --fix-names --folder "/Volumes/Media/Movies,/Volumes/SSD2/Movies,/Volumes/SSD3/Movies"
+```
+This renames subtitles to the universal `VideoBase.lang.ext` format (e.g., `Movie [1080p].en.srt`, `Movie [1080p].en2.srt` for duplicates). No API key required.
+
+### Example 6: Multi-Drive Survey Mode
+```bash
+./sublingual.sh --folder "/Volumes/Media/Movies,/Volumes/SSD2/Movies" --language EN,RO,FR,DE --survey
+```
+
 ## Troubleshooting
 
 ### "OMDb API key is not configured"
@@ -183,6 +206,7 @@ Run `./sublingual.sh --version` to see which dependencies are missing and instal
 ```
 sublingual/
 ├── sublingual.sh          # Main script
+├── CLAUDE.md             # Claude Code project context
 ├── README.md             # This file
 └── LICENSE               # MIT License
 ```
@@ -207,9 +231,16 @@ Contributions are welcome! Please feel free to submit issues or pull requests.
 
 ## Version
 
-Current version: **v1.0.0**
+Current version: **v1.1.0**
 
 ## Changelog
+
+### v1.1.0 (2026-02-14)
+- **Multi-drive support**: `--folder` now accepts comma-separated paths for scanning multiple drives in one run
+- **Subtitle name repair** (`--fix-names`): Standalone mode to fix misnamed subtitle files to the universal `VideoBase.lang.ext` convention, compatible with Plex, Jellyfin, Kodi, and Synology Video Station
+- **Automatic name repair**: Normal runs and survey cycles now fix subtitle filenames before downloading, improving duplicate detection
+- **Smart video matching**: When multiple video files exist (e.g., 1080p and 4K), selects the correct one based on which video existing subtitles reference
+- **Bug fixes**: Safer argument parsing, escaped-quote-safe JSON extraction, XML injection prevention in NFO files, UTC-correct midnight reset for API budget, fixed regex injection in IMDb mapping lookup
 
 ### v1.0.0 (2025-10-11)
 - Initial public release
