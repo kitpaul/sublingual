@@ -6,7 +6,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # Constants
-readonly SCRIPT_VERSION="v1.0.0"
+readonly SCRIPT_VERSION="v1.1.0"
 readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 readonly CURRENT_YEAR=$(date +%Y)
 readonly API_LIMIT=500
