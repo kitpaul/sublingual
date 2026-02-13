@@ -2393,6 +2393,19 @@ main() {
         clear_progress
         info "Found ${#all_dirs[@]} movie directories"
 
+        # Fix subtitle filenames before processing (ensures correct names
+        # so the downloader can detect existing subs and skip them)
+        info "Fixing subtitle filenames..."
+        local fix_count=0
+        for dir in "${all_dirs[@]}"; do
+            fix_subtitle_names "$dir"
+            ((fix_count++))
+            if (( fix_count % 100 == 0 )); then
+                info "  Fix-names progress: $fix_count/${#all_dirs[@]}"
+            fi
+        done
+        info "Subtitle filename check complete"
+
         # Survey mode: smart prioritization
         local movie_dirs=()
         if [[ "$SURVEY_MODE" == "true" ]]; then
