@@ -2161,11 +2161,17 @@ fix_subtitle_names() {
         sub_name=$(basename "$sub_file")
         local sub_ext="${sub_name##*.}"
 
-        # Already matches video base — skip
-        if [[ "$sub_name" == "${video_base}."* ]]; then
-            debug "   OK: $sub_name"
-            ((skipped_count++))
-            continue
+        # Already in clean format (VideoBase.lang.ext or VideoBase.lang2.ext) — skip
+        # Use substring comparison to avoid glob interpretation of brackets in filenames
+        local vb_len=${#video_base}
+        if [[ "${sub_name:0:$((vb_len + 1))}" == "${video_base}." ]]; then
+            local suffix="${sub_name:$((vb_len + 1))}"
+            # Clean = lang.ext or lang2.ext (exactly one dot)
+            if [[ "$suffix" =~ ^[a-z]{2}[0-9]*\.[a-zA-Z]+$ ]]; then
+                debug "   OK: $sub_name"
+                ((skipped_count++))
+                continue
+            fi
         fi
 
         # Extract language code from the subtitle filename
@@ -2196,6 +2202,10 @@ fix_subtitle_names() {
         local counter=2
 
         while [[ -f "$new_path" ]] || echo "$planned_names" | grep -qF "|${new_name}|"; do
+            # Skip if the collision is the source file itself (already at target name)
+            if [[ "$new_path" == "$sub_file" ]]; then
+                break
+            fi
             # Check if existing file is identical (same content)
             if [[ -f "$new_path" ]] && command -v md5 &>/dev/null; then
                 local new_hash=$(md5 -q "$sub_file" 2>/dev/null)
