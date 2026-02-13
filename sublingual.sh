@@ -374,12 +374,13 @@ parse_args() {
         # Trim leading/trailing whitespace
         _dir="$(echo "$_dir" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
         debug "Original path: ${_dir}"
-        _dir="$(validate_path "${_dir}")" || {
+        local _validated
+        _validated="$(validate_path "${_dir}")" || {
             error "Path validation failed for: ${_dir}"
             fatal "Invalid directory: ${_dir}"
         }
-        debug "Validated path: ${_dir}"
-        MOVIE_DIRS+=("$_dir")
+        debug "Validated path: ${_validated}"
+        MOVIE_DIRS+=("$_validated")
     done
 
     # Keep MOVIE_DIR pointing to the first path for backward compatibility
