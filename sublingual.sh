@@ -2652,7 +2652,7 @@ run_fix_names() {
 
     shopt -s nocasematch
     for _root in "${MOVIE_DIRS[@]}"; do
-        # Check if path itself contains videos (use glob, no fork)
+        # Check if root itself contains videos — if so, include it
         local _has_video=false
         for _f in "$_root"/*; do
             [[ -f "$_f" ]] || continue
@@ -2662,24 +2662,30 @@ run_fix_names() {
         done
         if [[ "$_has_video" == "true" ]]; then
             all_dirs+=("$_root")
-        else
-            while IFS= read -r -d '' dir; do
-                local _found=false
-                for _f in "$dir"/*; do
-                    [[ -f "$_f" ]] || continue
-                    case "${_f##*/}" in
-                        *.mkv|*.mp4|*.avi) _found=true; break ;;
-                    esac
-                done
-                if [[ "$_found" == "true" ]]; then
-                    all_dirs+=("$dir")
-                    ((scan_count++))
-                    if (( scan_count % 10 == 0 )); then
-                        show_scan_progress "$scan_count"
-                    fi
-                fi
-            done < <(find "$_root" -mindepth 1 -type d -print0)
         fi
+
+        # Always scan subdirectories too (root may have both loose files and movie folders)
+        local _subdirs=()
+        while IFS= read -r -d '' dir; do
+            _subdirs+=("$dir")
+        done < <(find "$_root" -mindepth 1 -maxdepth 2 -type d -print0)
+
+        for dir in "${_subdirs[@]}"; do
+            local _found=false
+            for _f in "$dir"/*; do
+                [[ -f "$_f" ]] || continue
+                case "${_f##*/}" in
+                    *.mkv|*.mp4|*.avi) _found=true; break ;;
+                esac
+            done
+            if [[ "$_found" == "true" ]]; then
+                all_dirs+=("$dir")
+                ((scan_count++))
+                if (( scan_count % 10 == 0 )); then
+                    show_scan_progress "$scan_count"
+                fi
+            fi
+        done
     done
     shopt -u nocasematch
 
