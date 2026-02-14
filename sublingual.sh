@@ -1931,11 +1931,15 @@ rename_subtitles() {
         local ext="${file##*.}"
 
         # Skip files that already match our naming pattern
-        if [[ "$(basename "$file")" == "${video_base}."* ]]; then
+        # Use bracket-safe substring comparison (video_base may contain [1080p])
+        local _bname
+        _bname=$(basename "$file")
+        local _vb_len=${#video_base}
+        if [[ "${_bname:0:$((_vb_len + 1))}" == "${video_base}." ]]; then
             # Already starts with video base name — check if it has a language tag
-            local remainder="${file##*${video_base}.}"
+            local remainder="${_bname:$((_vb_len + 1))}"
             if [[ "$remainder" =~ ^[a-z]{2}[0-9]*\. ]]; then
-                debug "   Already renamed: $(basename "$file")"
+                debug "   Already renamed: $_bname"
                 continue
             fi
         fi
@@ -1948,6 +1952,13 @@ rename_subtitles() {
             new_name="${video_base}.${lang_lower}${counter}.${ext}"
         fi
         local new_path="${movie_dir}/${new_name}"
+
+        # If source is already the target, skip
+        if [[ "$file" == "$new_path" ]]; then
+            debug "   Already correct: $(basename "$file")"
+            ((counter++))
+            continue
+        fi
 
         # If target exists, increment counter and retry
         while [[ -f "$new_path" ]]; do
