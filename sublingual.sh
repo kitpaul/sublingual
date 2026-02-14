@@ -2203,16 +2203,8 @@ clean_file_names() {
     local dir_name
     dir_name=$(basename "$movie_dir")
 
-    # Extract title from the clean folder name: "Title (Year)" → "Title"
-    local title=""
-    if [[ "$dir_name" =~ ^(.*)[[:space:]]+\([0-9]{4} ]]; then
-        title="${BASH_REMATCH[1]}"
-    else
-        debug "  Cannot extract title from folder: $dir_name"
-        return 0
-    fi
-
     # Remove junk files first (all .txt and image files are junk in movie folders)
+    # This runs on ALL directories, even ones we can't parse for renaming
     local _f
     shopt -s nocasematch
     for _f in "$movie_dir"/*; do
@@ -2231,6 +2223,15 @@ clean_file_names() {
         esac
     done
     shopt -u nocasematch
+
+    # Extract title from the clean folder name: "Title (Year)" → "Title"
+    local title=""
+    if [[ "$dir_name" =~ ^(.*)[[:space:]]+\([0-9]{4} ]]; then
+        title="${BASH_REMATCH[1]}"
+    else
+        debug "  Cannot extract title from folder: $dir_name"
+        return 0
+    fi
 
     # Find resolution from any video file in the directory
     local resolution=""
