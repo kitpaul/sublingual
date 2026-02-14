@@ -402,8 +402,8 @@ parse_args() {
         fatal "--folder is required"
     fi
 
-    # Validate language codes (skip for local-only modes)
-    if [[ "$FIX_NAMES" != "true" && "$CLEAN_NAMES" != "true" ]]; then
+    # Validate language codes only when subtitle fetching will happen
+    if [[ -n "${OPENSUBTITLES_API_KEY:-}" || ( "$FIX_NAMES" != "true" && "$CLEAN_NAMES" != "true" ) ]]; then
         validate_language_codes "${LANGUAGES}"
     fi
 
@@ -2676,26 +2676,36 @@ main() {
 
     info "Sublingual ${SCRIPT_VERSION} starting..."
 
-    # --fix-names: rename subtitles to match video files, then exit
-    # No API key needed — this is a local-only operation
+    # Pre-processing: --clean-names and --fix-names run before subtitle fetching
+    # If no API key is set, these are standalone modes and exit after running.
+    # If an API key IS set, they run as pre-processing steps, then continue to subs.
+
+    if [[ "$CLEAN_NAMES" == "true" ]]; then
+        info "Mode: Clean folder/file names (strip bracket tags)"
+        for _d in "${MOVIE_DIRS[@]}"; do info "  Movie dir: ${_d}"; done
+        info "  Dry-run: ${DRY_RUN}"
+        info ""
+        run_clean_names
+        if [[ -z "${OPENSUBTITLES_API_KEY:-}" ]]; then
+            exit 0
+        fi
+        info ""
+        info "Continuing to subtitle processing..."
+        info ""
+    fi
+
     if [[ "$FIX_NAMES" == "true" ]]; then
         info "Mode: Fix subtitle filenames"
         for _d in "${MOVIE_DIRS[@]}"; do info "  Movie dir: ${_d}"; done
         info "  Dry-run: ${DRY_RUN}"
         info ""
         run_fix_names
-        exit 0
-    fi
-
-    # --clean-names: strip bracket tags from folder names, then exit
-    # No API key needed — this is a local-only operation
-    if [[ "$CLEAN_NAMES" == "true" ]]; then
-        info "Mode: Clean folder names (strip bracket tags)"
-        for _d in "${MOVIE_DIRS[@]}"; do info "  Movie dir: ${_d}"; done
-        info "  Dry-run: ${DRY_RUN}"
+        if [[ -z "${OPENSUBTITLES_API_KEY:-}" ]]; then
+            exit 0
+        fi
         info ""
-        run_clean_names
-        exit 0
+        info "Continuing to subtitle processing..."
+        info ""
     fi
 
     info "Configuration:"
