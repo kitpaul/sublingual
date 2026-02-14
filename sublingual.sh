@@ -2195,23 +2195,168 @@ clean_folder_name() {
     fi
 }
 
+# Clean up YTS-style filenames inside a movie folder
+# Uses the (already clean) folder name to derive title, and extracts resolution from filenames
+# Also removes junk files (YTS ads, NFO spam)
+clean_file_names() {
+    local movie_dir="$1"
+    local dir_name
+    dir_name=$(basename "$movie_dir")
+
+    # Extract title from the clean folder name: "Title (Year)" → "Title"
+    local title=""
+    if [[ "$dir_name" =~ ^(.*)[[:space:]]+\([0-9]{4} ]]; then
+        title="${BASH_REMATCH[1]}"
+    else
+        debug "  Cannot extract title from folder: $dir_name"
+        return 0
+    fi
+
+    # Remove junk files first
+    local _f
+    for _f in "$movie_dir"/*; do
+        [[ -f "$_f" ]] || continue
+        local fname
+        fname=$(basename "$_f")
+        case "$fname" in
+            www.YTS.*|www.yts.*|YTS.*Official*|YTS.*site*|*YTSYify*|RARBG.txt|RARBG.com.txt)
+                if [[ "$DRY_RUN" == "true" ]]; then
+                    info "    DRY-RUN: would delete junk: $fname"
+                else
+                    rm -f "$_f"
+                    info "    Deleted junk: $fname"
+                fi
+                ;;
+        esac
+    done
+
+    # Find resolution from any video file in the directory
+    local resolution=""
+    shopt -s nocasematch
+    for _f in "$movie_dir"/*; do
+        [[ -f "$_f" ]] || continue
+        local fname
+        fname=$(basename "$_f")
+        case "$fname" in
+            *.mkv|*.mp4|*.avi)
+                if [[ "$fname" =~ \.(720p|1080p|2160p|4K)\. ]]; then
+                    resolution="${BASH_REMATCH[1]}"
+                fi
+                break
+                ;;
+        esac
+    done
+    shopt -u nocasematch
+
+    # Build the new base name: "Title [Resolution]" or just "Title"
+    local new_base="$title"
+    if [[ -n "$resolution" ]]; then
+        new_base="${title} [${resolution}]"
+    fi
+
+    # Rename files that have dot-separated YTS naming
+    shopt -s nocasematch
+    for _f in "$movie_dir"/*; do
+        [[ -f "$_f" ]] || continue
+        local fname
+        fname=$(basename "$_f")
+        local ext="${fname##*.}"
+
+        # Skip files that are already clean (start with title)
+        # Use substring comparison to avoid glob issues with brackets
+        local title_len=${#new_base}
+        if [[ "${fname:0:$((title_len + 1))}" == "${new_base}." ]]; then
+            continue
+        fi
+        # Also check without resolution bracket
+        local title_only_len=${#title}
+        if [[ "${fname:0:$((title_only_len + 1))}" == "${title}." ]]; then
+            # Could be an already-clean file like "Title.en.srt"
+            local after_title="${fname:$((title_only_len + 1))}"
+            if [[ ! "$after_title" =~ \. ]] || [[ "$after_title" =~ ^[a-z]{2}[0-9]*\. ]]; then
+                continue
+            fi
+        fi
+
+        # Only process files that look like YTS format (dot-separated with year)
+        if [[ ! "$fname" =~ \.(19[0-9]{2}|20[0-9]{2})\. ]]; then
+            continue
+        fi
+
+        local new_name="${new_base}.${ext}"
+        local new_path="${movie_dir}/${new_name}"
+
+        # Handle collision (e.g., both .srt files → need numbering)
+        if [[ -f "$new_path" ]] && [[ "$new_path" != "$_f" ]]; then
+            # For subtitles, try to add language code
+            case "$ext" in
+                srt|sub|ass|ssa|vtt)
+                    # Check if a language code exists in the original filename
+                    local lang=""
+                    if [[ "$fname" =~ \.([a-z]{2})\.[a-z]+$ ]]; then
+                        lang="${BASH_REMATCH[1]}"
+                    fi
+                    if [[ -n "$lang" ]]; then
+                        new_name="${new_base}.${lang}.${ext}"
+                    else
+                        new_name="${new_base}2.${ext}"
+                    fi
+                    new_path="${movie_dir}/${new_name}"
+                    # Still collides?
+                    local counter=2
+                    while [[ -f "$new_path" ]] && [[ "$new_path" != "$_f" ]]; do
+                        ((counter++))
+                        new_name="${new_base}${counter}.${ext}"
+                        new_path="${movie_dir}/${new_name}"
+                    done
+                    ;;
+                *)
+                    # For non-subtitle duplicates, add counter
+                    local counter=2
+                    while [[ -f "$new_path" ]] && [[ "$new_path" != "$_f" ]]; do
+                        new_name="${new_base}.${counter}.${ext}"
+                        new_path="${movie_dir}/${new_name}"
+                        ((counter++))
+                    done
+                    ;;
+            esac
+        fi
+
+        if [[ "$new_path" == "$_f" ]]; then
+            continue
+        fi
+
+        if [[ "$DRY_RUN" == "true" ]]; then
+            info "    DRY-RUN: $fname → $new_name"
+        else
+            mv "$_f" "$new_path"
+            info "    File: $fname → $new_name"
+        fi
+    done
+    shopt -u nocasematch
+}
+
 # Run --clean-names across all movie directories
 run_clean_names() {
-    info "Scanning for movie directories with bracket tags..."
+    info "Scanning for directories..."
     local all_dirs=()
 
     for _root in "${MOVIE_DIRS[@]}"; do
+        # Include the root itself if it looks like a movie folder (has files)
+        local _has_files=false
+        for _f in "$_root"/*; do
+            if [[ -f "$_f" ]]; then _has_files=true; break; fi
+        done
+        if [[ "$_has_files" == "true" ]]; then
+            all_dirs+=("$_root")
+        fi
+        # Also scan subdirectories
         while IFS= read -r -d '' dir; do
-            local dname
-            dname=$(basename "$dir")
-            # Only consider directories that have bracket tags
-            case "$dname" in
-                *\[*) all_dirs+=("$dir") ;;
-            esac
+            all_dirs+=("$dir")
         done < <(find "$_root" -mindepth 1 -maxdepth 2 -type d -print0)
     done
 
-    info "Found ${#all_dirs[@]} directories with bracket tags"
+    info "Found ${#all_dirs[@]} directories"
     info ""
 
     if [[ ${#all_dirs[@]} -eq 0 ]]; then
@@ -2219,15 +2364,51 @@ run_clean_names() {
         return 0
     fi
 
+    # Phase 1: rename folders that have bracket tags
+    local bracket_count=0
     for dir in "${all_dirs[@]}"; do
-        clean_folder_name "$dir"
+        local dname
+        dname=$(basename "$dir")
+        case "$dname" in
+            *\[*)
+                clean_folder_name "$dir"
+                ((bracket_count++))
+                ;;
+        esac
+    done
+
+    if [[ $bracket_count -gt 0 ]]; then
+        info ""
+        info "Folder cleanup: checked $bracket_count bracket-tagged directories"
+        info ""
+    fi
+
+    # Phase 2: clean filenames inside directories
+    # Re-scan after folder renames to get the new paths
+    info "Cleaning file names inside directories..."
+    local clean_dirs=()
+    for _root in "${MOVIE_DIRS[@]}"; do
+        local _has_files=false
+        for _f in "$_root"/*; do
+            if [[ -f "$_f" ]]; then _has_files=true; break; fi
+        done
+        if [[ "$_has_files" == "true" ]]; then
+            clean_dirs+=("$_root")
+        fi
+        while IFS= read -r -d '' dir; do
+            clean_dirs+=("$dir")
+        done < <(find "$_root" -mindepth 1 -maxdepth 2 -type d -print0)
+    done
+
+    for dir in "${clean_dirs[@]}"; do
+        clean_file_names "$dir"
     done
 
     info ""
     info "=================================================="
-    info "Clean-names complete: checked ${#all_dirs[@]} directories"
+    info "Clean-names complete: ${#all_dirs[@]} directories processed"
     if [[ "$DRY_RUN" == "true" ]]; then
-        info "(Dry-run mode — no folders were actually renamed)"
+        info "(Dry-run mode — no changes were made)"
     fi
     info "=================================================="
 }
