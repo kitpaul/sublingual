@@ -2212,14 +2212,15 @@ clean_file_names() {
         return 0
     fi
 
-    # Remove junk files first
+    # Remove junk files first (all .txt and image files are junk in movie folders)
     local _f
+    shopt -s nocasematch
     for _f in "$movie_dir"/*; do
         [[ -f "$_f" ]] || continue
         local fname
         fname=$(basename "$_f")
         case "$fname" in
-            www.YTS.*|www.yts.*|YTS.*Official*|YTS.*site*|*YTSYify*|RARBG.txt|RARBG.com.txt)
+            *.txt|*.jpg|*.jpeg|*.png)
                 if [[ "$DRY_RUN" == "true" ]]; then
                     info "    DRY-RUN: would delete junk: $fname"
                 else
@@ -2229,6 +2230,7 @@ clean_file_names() {
                 ;;
         esac
     done
+    shopt -u nocasematch
 
     # Find resolution from any video file in the directory
     local resolution=""
