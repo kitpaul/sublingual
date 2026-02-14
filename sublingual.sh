@@ -2535,13 +2535,37 @@ fix_subtitle_names() {
         sub_name=$(basename "$sub_file")
         local sub_ext="${sub_name##*.}"
 
-        # Already in clean format (VideoBase.lang.ext or VideoBase.lang2.ext) — skip
+        # Already in clean format — check if it needs correction
         # Use substring comparison to avoid glob interpretation of brackets in filenames
         local vb_len=${#video_base}
         if [[ "${sub_name:0:$((vb_len + 1))}" == "${video_base}." ]]; then
             local suffix="${sub_name:$((vb_len + 1))}"
-            # Clean = lang.ext or lang2.ext (exactly one dot)
-            if [[ "$suffix" =~ ^[a-z]{2}[0-9]*\.[a-zA-Z]+$ ]]; then
+            if [[ "$suffix" =~ ^([a-z]{2})([0-9]+)\.([a-zA-Z]+)$ ]]; then
+                # Numbered format like .en2.srt — check if .en.srt is missing
+                local _lang="${BASH_REMATCH[1]}"
+                local _num="${BASH_REMATCH[2]}"
+                local _ext="${BASH_REMATCH[3]}"
+                local _base_path="${movie_dir}/${video_base}.${_lang}.${_ext}"
+                if [[ ! -f "$_base_path" ]]; then
+                    # No .lang.srt exists — fix .lang2.srt → .lang.srt
+                    local _new_name="${video_base}.${_lang}.${_ext}"
+                    if [[ "$DRY_RUN" == "true" ]]; then
+                        info "   DRY-RUN: $sub_name -> $_new_name"
+                    else
+                        if mv "$sub_file" "$_base_path" 2>/dev/null; then
+                            info "   Fixed: $sub_name -> $_new_name"
+                        else
+                            warn "   Failed to rename: $sub_name"
+                        fi
+                    fi
+                    ((fixed_count++))
+                    continue
+                fi
+                debug "   OK: $sub_name"
+                ((skipped_count++))
+                continue
+            elif [[ "$suffix" =~ ^[a-z]{2}\.[a-zA-Z]+$ ]]; then
+                # Clean format: .lang.ext — already correct
                 debug "   OK: $sub_name"
                 ((skipped_count++))
                 continue
