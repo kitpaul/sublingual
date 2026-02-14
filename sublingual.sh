@@ -403,7 +403,7 @@ parse_args() {
     fi
 
     # Validate language codes only when subtitle fetching will happen
-    if [[ -n "${OPENSUBTITLES_API_KEY:-}" || ( "$FIX_NAMES" != "true" && "$CLEAN_NAMES" != "true" ) ]]; then
+    if [[ -n "${OMDB_KEY:-}" || ( "$FIX_NAMES" != "true" && "$CLEAN_NAMES" != "true" ) ]]; then
         validate_language_codes "${LANGUAGES}"
     fi
 
@@ -2689,7 +2689,7 @@ main() {
         info "  Dry-run: ${DRY_RUN}"
         info ""
         run_clean_names
-        if [[ -z "${OPENSUBTITLES_API_KEY:-}" ]]; then
+        if [[ -z "${OMDB_KEY:-}" ]]; then
             exit 0
         fi
         info ""
@@ -2703,7 +2703,7 @@ main() {
         info "  Dry-run: ${DRY_RUN}"
         info ""
         run_fix_names
-        if [[ -z "${OPENSUBTITLES_API_KEY:-}" ]]; then
+        if [[ -z "${OMDB_KEY:-}" ]]; then
             exit 0
         fi
         info ""
