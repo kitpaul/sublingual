@@ -28,6 +28,7 @@ RENAME="true"
 DRY_RUN="false"
 SURVEY_MODE="false"
 FIX_NAMES="false"
+CLEAN_NAMES="false"
 
 # Statistics tracking
 STATS_IMDB_SUCCESS=0
@@ -58,6 +59,39 @@ info() { log "INFO" "$@"; }
 warn() { log "WARN" "$@"; }
 error() { log "ERROR" "$@"; }
 fatal() { log "FATAL" "$@"; exit 1; }
+
+# Glob-based file finders (no fork, avoids fd leaks over 7000+ calls)
+# Returns first .nfo file in a directory (or empty string)
+find_nfo() {
+    local _d="$1" _f
+    shopt -s nocaseglob
+    for _f in "$_d"/*.nfo; do
+        if [[ -f "$_f" ]]; then
+            shopt -u nocaseglob
+            echo "$_f"
+            return 0
+        fi
+    done
+    shopt -u nocaseglob
+    return 1
+}
+# Returns first video file in a directory (or empty string)
+find_video() {
+    local _d="$1" _f
+    shopt -s nocasematch
+    for _f in "$_d"/*; do
+        [[ -f "$_f" ]] || continue
+        case "${_f##*/}" in
+            *.mkv|*.mp4|*.avi)
+                shopt -u nocasematch
+                echo "$_f"
+                return 0
+                ;;
+        esac
+    done
+    shopt -u nocasematch
+    return 1
+}
 
 # Safe string operations
 url_encode() {
@@ -339,6 +373,10 @@ parse_args() {
                 FIX_NAMES="true"
                 shift
                 ;;
+            --clean-names)
+                CLEAN_NAMES="true"
+                shift
+                ;;
             --workers)
                 require_arg "$1" "$#"
                 validate_positive_integer "$2" "--workers"
@@ -364,8 +402,10 @@ parse_args() {
         fatal "--folder is required"
     fi
 
-    # Validate language codes
-    validate_language_codes "${LANGUAGES}"
+    # Validate language codes (skip for local-only modes)
+    if [[ "$FIX_NAMES" != "true" && "$CLEAN_NAMES" != "true" ]]; then
+        validate_language_codes "${LANGUAGES}"
+    fi
 
     # Support comma-separated paths: split, validate each, store in array
     MOVIE_DIRS=()
@@ -615,7 +655,7 @@ get_imdb_from_nfo() {
     local dir_path="$1"
 
     # Find .nfo file in directory
-    local nfo_file=$(find "$dir_path" -maxdepth 1 -name "*.nfo" -print -quit 2>/dev/null)
+    local nfo_file=$(find_nfo "$dir_path")
 
     if [[ -z "$nfo_file" ]]; then
         return 1
@@ -744,7 +784,7 @@ write_nfo_cache() {
     local nfo_existed=false
 
     # First check if NFO already exists
-    local existing_nfo=$(find "$movie_dir" -maxdepth 1 -name "*.nfo" -print -quit 2>/dev/null)
+    local existing_nfo=$(find_nfo "$movie_dir")
 
     if [[ -n "$existing_nfo" ]]; then
         nfo_file="$existing_nfo"
@@ -784,7 +824,7 @@ write_nfo_cache() {
         fi
     else
         # Find video file to name NFO after it (Kodi preferred format)
-        local video_file=$(find "$movie_dir" -maxdepth 1 -type f \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit 2>/dev/null)
+        local video_file=$(find_video "$movie_dir")
 
         if [[ -n "$video_file" ]]; then
             # Use video filename without extension
@@ -1191,7 +1231,7 @@ extract_year() {
     fi
 
     # Method 3: Check .nfo file
-    local nfo_file=$(find "$dir_path" -maxdepth 1 -name "*.nfo" -print -quit 2>/dev/null)
+    local nfo_file=$(find_nfo "$dir_path")
     if [[ -n "$nfo_file" ]]; then
         year=$(grep -oE '<year>[0-9]{4}</year>' "$nfo_file" 2>/dev/null | grep -oE '[0-9]{4}' | head -1)
         if [[ -n "$year" ]]; then
@@ -1263,7 +1303,7 @@ parse_movie_info() {
     # If no resolution in directory name, check video files
     if [[ -z "$resolution" ]]; then
         local video_file
-        video_file=$(find "$dir_path" -maxdepth 1 -type f \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit 2>/dev/null)
+        video_file=$(find_video "$dir_path")
         if [[ -n "$video_file" ]]; then
             local video_name="$(basename "$video_file")"
             # Check for resolution patterns in video filename
@@ -1807,7 +1847,7 @@ rename_subtitles() {
     # This ensures subtitle filenames match the video for auto-association in
     # Kodi, Plex, Jellyfin, Synology Video Station, Sonarr/Radarr, and Bazarr
     local video_file
-    video_file=$(find "$movie_dir" -maxdepth 1 -type f \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit 2>/dev/null)
+    video_file=$(find_video "$movie_dir")
 
     local video_base=""
     if [[ -n "$video_file" ]]; then
@@ -1820,11 +1860,25 @@ rename_subtitles() {
         return
     fi
 
-    # Find new subtitle files (all formats)
+    # Find new subtitle files (all formats) newer than the marker
+    local marker_mtime
+    marker_mtime=$(stat -f%m "$marker_file" 2>/dev/null || echo "0")
     local new_files=()
-    while IFS= read -r -d '' file; do
-        new_files+=("$file")
-    done < <(find "$movie_dir" -maxdepth 1 \( -name "*.srt" -o -name "*.sub" -o -name "*.ass" -o -name "*.ssa" -o -name "*.vtt" -o -name "*.idx" -o -name "*.txt" \) -newer "$marker_file" -print0 2>/dev/null)
+    local _f
+    shopt -s nocasematch
+    for _f in "$movie_dir"/*; do
+        [[ -f "$_f" ]] || continue
+        case "${_f##*/}" in
+            *.srt|*.sub|*.ass|*.ssa|*.vtt|*.idx|*.txt) ;;
+            *) continue ;;
+        esac
+        local _mtime
+        _mtime=$(stat -f%m "$_f" 2>/dev/null || echo "0")
+        if [[ "$_mtime" -gt "$marker_mtime" ]]; then
+            new_files+=("$_f")
+        fi
+    done
+    shopt -u nocasematch
 
     debug "Found ${#new_files[@]} subtitle files newer than marker"
 
@@ -1963,7 +2017,7 @@ show_summary_statistics() {
 # Check if a folder has an NFO file
 has_nfo_file() {
     local dir="$1"
-    [[ -n $(find "$dir" -maxdepth 1 -name "*.nfo" -print -quit 2>/dev/null) ]] && return 0 || return 1
+    find_nfo "$dir" >/dev/null 2>&1
 }
 
 # Load survey state (processed folders)
@@ -2071,6 +2125,113 @@ wait_for_api_reset() {
     sleep 2
 }
 
+# Clean up folder names: strip bracket tags, normalize year format
+# Handles two patterns:
+#   "Title (Year) [1080p] [BluRay] [YTS.MX]" → "Title (Year)"
+#   "Title [Year]"                            → "Title (Year)"
+# Skips folders that don't match either pattern (too ambiguous)
+clean_folder_name() {
+    local movie_dir="$1"
+    local dir_name
+    dir_name=$(basename "$movie_dir")
+    local parent_dir
+    parent_dir=$(dirname "$movie_dir")
+
+    # Already clean? No brackets at all → skip
+    case "$dir_name" in
+        *\[*) ;;  # has brackets, continue
+        *) return 0 ;;
+    esac
+
+    local clean_name=""
+
+    # Pattern 1: Title (Year) [tags...] — year already in parens
+    if [[ "$dir_name" =~ ^(.*\([0-9]{4}(,\ ?[0-9]{4})?\))\ *\[.* ]]; then
+        # Everything up to and including the (Year) group
+        clean_name="${BASH_REMATCH[1]}"
+        # Trim trailing whitespace
+        clean_name="$(echo "$clean_name" | sed 's/[[:space:]]*$//')"
+
+    # Pattern 2: Title [Year] — year in brackets (possibly with extra ])
+    elif [[ "$dir_name" =~ ^(.*[^[])[[:space:]]*\[(19[0-9]{2}|20[0-9]{2})\]\]?$ ]]; then
+        local title_part="${BASH_REMATCH[1]}"
+        local year_part="${BASH_REMATCH[2]}"
+        # Trim trailing whitespace from title
+        title_part="$(echo "$title_part" | sed 's/[[:space:]]*$//')"
+        clean_name="${title_part} (${year_part})"
+
+    # Pattern 3: Title [Year] [tags...] — year in brackets followed by more tags
+    elif [[ "$dir_name" =~ ^(.*[^[])[[:space:]]*\[(19[0-9]{2}|20[0-9]{2})\][[:space:]]*\[.* ]]; then
+        local title_part="${BASH_REMATCH[1]}"
+        local year_part="${BASH_REMATCH[2]}"
+        title_part="$(echo "$title_part" | sed 's/[[:space:]]*$//')"
+        clean_name="${title_part} (${year_part})"
+    else
+        # Does not match any known pattern — skip
+        debug "  SKIP (ambiguous): $dir_name"
+        return 0
+    fi
+
+    # No change needed
+    if [[ "$clean_name" == "$dir_name" ]]; then
+        return 0
+    fi
+
+    local new_path="${parent_dir}/${clean_name}"
+
+    # Collision: target already exists
+    if [[ -e "$new_path" ]]; then
+        warn "  COLLISION: cannot rename '$dir_name' → '$clean_name' (target exists)"
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        info "  DRY-RUN: $dir_name"
+        info "        → $clean_name"
+    else
+        mv "$movie_dir" "$new_path"
+        info "  RENAMED: $dir_name"
+        info "        → $clean_name"
+    fi
+}
+
+# Run --clean-names across all movie directories
+run_clean_names() {
+    info "Scanning for movie directories with bracket tags..."
+    local all_dirs=()
+
+    for _root in "${MOVIE_DIRS[@]}"; do
+        while IFS= read -r -d '' dir; do
+            local dname
+            dname=$(basename "$dir")
+            # Only consider directories that have bracket tags
+            case "$dname" in
+                *\[*) all_dirs+=("$dir") ;;
+            esac
+        done < <(find "$_root" -mindepth 1 -maxdepth 2 -type d -print0)
+    done
+
+    info "Found ${#all_dirs[@]} directories with bracket tags"
+    info ""
+
+    if [[ ${#all_dirs[@]} -eq 0 ]]; then
+        info "Nothing to clean."
+        return 0
+    fi
+
+    for dir in "${all_dirs[@]}"; do
+        clean_folder_name "$dir"
+    done
+
+    info ""
+    info "=================================================="
+    info "Clean-names complete: checked ${#all_dirs[@]} directories"
+    if [[ "$DRY_RUN" == "true" ]]; then
+        info "(Dry-run mode — no folders were actually renamed)"
+    fi
+    info "=================================================="
+}
+
 # Fix subtitle filenames to match the video file (for media server compatibility)
 # Renames old-pattern subtitles like "Movie (2024) [1080p].en.En1.srt"
 # to match the video: "Movie [1080p].en.srt"
@@ -2080,22 +2241,32 @@ fix_subtitle_names() {
     local movie_basename
     movie_basename=$(basename "$movie_dir")
 
-    # Find all video files
+    # Find all video files (use glob to avoid fd leaks from process substitution)
     local video_files=()
-    while IFS= read -r -d '' vf; do
-        video_files+=("$vf")
-    done < <(find "$movie_dir" -maxdepth 1 -type f \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print0 2>/dev/null)
+    local _f
+    shopt -s nocasematch
+    for _f in "$movie_dir"/*; do
+        [[ -f "$_f" ]] || continue
+        case "${_f##*/}" in
+            *.mkv|*.mp4|*.avi) video_files+=("$_f") ;;
+        esac
+    done
 
     if [[ ${#video_files[@]} -eq 0 ]]; then
+        shopt -u nocasematch
         debug "No video file in: $movie_basename"
         return
     fi
 
-    # Find all subtitle files in directory first (needed for video selection)
+    # Find all subtitle files (use glob to avoid fd leaks)
     local sub_files=()
-    while IFS= read -r -d '' file; do
-        sub_files+=("$file")
-    done < <(find "$movie_dir" -maxdepth 1 -type f \( -iname "*.srt" -o -iname "*.sub" -o -iname "*.ass" -o -iname "*.ssa" -o -iname "*.vtt" \) -print0 2>/dev/null)
+    for _f in "$movie_dir"/*; do
+        [[ -f "$_f" ]] || continue
+        case "${_f##*/}" in
+            *.srt|*.sub|*.ass|*.ssa|*.vtt) sub_files+=("$_f") ;;
+        esac
+    done
+    shopt -u nocasematch
 
     if [[ ${#sub_files[@]} -eq 0 ]]; then
         return
@@ -2260,13 +2431,28 @@ run_fix_names() {
     local all_dirs=()
     local scan_count=0
 
+    shopt -s nocasematch
     for _root in "${MOVIE_DIRS[@]}"; do
-        # Check if path itself contains videos
-        if find "$_root" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
+        # Check if path itself contains videos (use glob, no fork)
+        local _has_video=false
+        for _f in "$_root"/*; do
+            [[ -f "$_f" ]] || continue
+            case "${_f##*/}" in
+                *.mkv|*.mp4|*.avi) _has_video=true; break ;;
+            esac
+        done
+        if [[ "$_has_video" == "true" ]]; then
             all_dirs+=("$_root")
         else
             while IFS= read -r -d '' dir; do
-                if find "$dir" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
+                local _found=false
+                for _f in "$dir"/*; do
+                    [[ -f "$_f" ]] || continue
+                    case "${_f##*/}" in
+                        *.mkv|*.mp4|*.avi) _found=true; break ;;
+                    esac
+                done
+                if [[ "$_found" == "true" ]]; then
                     all_dirs+=("$dir")
                     ((scan_count++))
                     if (( scan_count % 10 == 0 )); then
@@ -2276,6 +2462,7 @@ run_fix_names() {
             done < <(find "$_root" -mindepth 1 -type d -print0)
         fi
     done
+    shopt -u nocasematch
 
     clear_progress
     info "Found ${#all_dirs[@]} movie directories"
@@ -2306,7 +2493,7 @@ main() {
     check_optional_components
     parse_args "$@"
 
-    info "Sublingual v${SCRIPT_VERSION} starting..."
+    info "Sublingual ${SCRIPT_VERSION} starting..."
 
     # --fix-names: rename subtitles to match video files, then exit
     # No API key needed — this is a local-only operation
@@ -2316,6 +2503,17 @@ main() {
         info "  Dry-run: ${DRY_RUN}"
         info ""
         run_fix_names
+        exit 0
+    fi
+
+    # --clean-names: strip bracket tags from folder names, then exit
+    # No API key needed — this is a local-only operation
+    if [[ "$CLEAN_NAMES" == "true" ]]; then
+        info "Mode: Clean folder names (strip bracket tags)"
+        for _d in "${MOVIE_DIRS[@]}"; do info "  Movie dir: ${_d}"; done
+        info "  Dry-run: ${DRY_RUN}"
+        info ""
+        run_clean_names
         exit 0
     fi
 
@@ -2369,16 +2567,31 @@ main() {
         local scan_count=0
 
         # Scan all provided paths for movie directories
+        shopt -s nocasematch
         for _root in "${MOVIE_DIRS[@]}"; do
-            # First check if the provided path itself contains videos
-            if find "$_root" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
+            # First check if the provided path itself contains videos (glob, no fork)
+            local _has_vid=false
+            for _f in "$_root"/*; do
+                [[ -f "$_f" ]] || continue
+                case "${_f##*/}" in
+                    *.mkv|*.mp4|*.avi) _has_vid=true; break ;;
+                esac
+            done
+            if [[ "$_has_vid" == "true" ]]; then
                 all_dirs+=("$_root")
                 ((scan_count++))
                 show_scan_progress "$scan_count"
             else
                 # Otherwise search subdirectories with progress feedback
                 while IFS= read -r -d '' dir; do
-                    if find "$dir" -maxdepth 1 \( -iname "*.mkv" -o -iname "*.mp4" -o -iname "*.avi" \) -print -quit | grep -q .; then
+                    local _found_vid=false
+                    for _f in "$dir"/*; do
+                        [[ -f "$_f" ]] || continue
+                        case "${_f##*/}" in
+                            *.mkv|*.mp4|*.avi) _found_vid=true; break ;;
+                        esac
+                    done
+                    if [[ "$_found_vid" == "true" ]]; then
                         all_dirs+=("$dir")
                         ((scan_count++))
                         # Show progress every 10 folders to avoid terminal spam
@@ -2389,6 +2602,7 @@ main() {
                 done < <(find "$_root" -mindepth 1 -type d -print0)
             fi
         done
+        shopt -u nocasematch
 
         clear_progress
         info "Found ${#all_dirs[@]} movie directories"
@@ -2639,6 +2853,10 @@ OPTIONS
     --survey            Enable survey mode for continuous monitoring
     --fix-names         Rename existing subtitles to match video filenames
                         (for media server compatibility; no API key needed)
+    --clean-names       Strip bracket tags from folder names
+                        e.g., "Movie (2024) [1080p] [YTS.MX]" → "Movie (2024)"
+                        Handles [Year] → (Year) conversion; skips ambiguous names
+                        (no API key needed)
     --dry-run           Preview operations without making changes
     --debug             Enable verbose debug logging
     --no-rename         Keep original subtitle filenames
