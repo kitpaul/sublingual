@@ -2652,24 +2652,13 @@ run_fix_names() {
 
     shopt -s nocasematch
     for _root in "${MOVIE_DIRS[@]}"; do
-        # Check if root itself contains videos — if so, include it
-        local _has_video=false
-        for _f in "$_root"/*; do
-            [[ -f "$_f" ]] || continue
-            case "${_f##*/}" in
-                *.mkv|*.mp4|*.avi) _has_video=true; break ;;
-            esac
-        done
-        if [[ "$_has_video" == "true" ]]; then
-            all_dirs+=("$_root")
-        fi
-
-        # Always scan subdirectories too (root may have both loose files and movie folders)
+        # Scan subdirectories first
         local _subdirs=()
         while IFS= read -r -d '' dir; do
             _subdirs+=("$dir")
         done < <(find "$_root" -mindepth 1 -maxdepth 2 -type d -print0)
 
+        local _found_sub_dirs=false
         for dir in "${_subdirs[@]}"; do
             local _found=false
             for _f in "$dir"/*; do
@@ -2680,12 +2669,27 @@ run_fix_names() {
             done
             if [[ "$_found" == "true" ]]; then
                 all_dirs+=("$dir")
+                _found_sub_dirs=true
                 ((scan_count++))
                 if (( scan_count % 10 == 0 )); then
                     show_scan_progress "$scan_count"
                 fi
             fi
         done
+
+        # Only add root if it has videos AND no subdirs with videos
+        if [[ "$_found_sub_dirs" == "false" ]]; then
+            local _has_video=false
+            for _f in "$_root"/*; do
+                [[ -f "$_f" ]] || continue
+                case "${_f##*/}" in
+                    *.mkv|*.mp4|*.avi) _has_video=true; break ;;
+                esac
+            done
+            if [[ "$_has_video" == "true" ]]; then
+                all_dirs+=("$_root")
+            fi
+        fi
     done
     shopt -u nocasematch
 
@@ -2804,37 +2808,46 @@ main() {
         # Scan all provided paths for movie directories
         shopt -s nocasematch
         for _root in "${MOVIE_DIRS[@]}"; do
-            # First check if the provided path itself contains videos (glob, no fork)
-            local _has_vid=false
-            for _f in "$_root"/*; do
-                [[ -f "$_f" ]] || continue
-                case "${_f##*/}" in
-                    *.mkv|*.mp4|*.avi) _has_vid=true; break ;;
-                esac
-            done
-            if [[ "$_has_vid" == "true" ]]; then
-                all_dirs+=("$_root")
-                ((scan_count++))
-                show_scan_progress "$scan_count"
-            else
-                # Otherwise search subdirectories with progress feedback
-                while IFS= read -r -d '' dir; do
-                    local _found_vid=false
-                    for _f in "$dir"/*; do
-                        [[ -f "$_f" ]] || continue
-                        case "${_f##*/}" in
-                            *.mkv|*.mp4|*.avi) _found_vid=true; break ;;
-                        esac
-                    done
-                    if [[ "$_found_vid" == "true" ]]; then
-                        all_dirs+=("$dir")
-                        ((scan_count++))
-                        # Show progress every 10 folders to avoid terminal spam
-                        if (( scan_count % 10 == 0 )) || [[ $scan_count -eq 1 ]]; then
-                            show_scan_progress "$scan_count"
-                        fi
+            # Scan subdirectories first
+            local _subdirs=()
+            while IFS= read -r -d '' dir; do
+                _subdirs+=("$dir")
+            done < <(find "$_root" -mindepth 1 -maxdepth 2 -type d -print0)
+
+            local _found_sub_dirs=false
+            for dir in "${_subdirs[@]}"; do
+                local _found_vid=false
+                for _f in "$dir"/*; do
+                    [[ -f "$_f" ]] || continue
+                    case "${_f##*/}" in
+                        *.mkv|*.mp4|*.avi) _found_vid=true; break ;;
+                    esac
+                done
+                if [[ "$_found_vid" == "true" ]]; then
+                    all_dirs+=("$dir")
+                    _found_sub_dirs=true
+                    ((scan_count++))
+                    if (( scan_count % 10 == 0 )) || [[ $scan_count -eq 1 ]]; then
+                        show_scan_progress "$scan_count"
                     fi
-                done < <(find "$_root" -mindepth 1 -type d -print0)
+                fi
+            done
+
+            # Only add root as movie dir if it has videos AND no subdirs with videos
+            # (otherwise root is a container folder, not a movie folder)
+            if [[ "$_found_sub_dirs" == "false" ]]; then
+                local _has_vid=false
+                for _f in "$_root"/*; do
+                    [[ -f "$_f" ]] || continue
+                    case "${_f##*/}" in
+                        *.mkv|*.mp4|*.avi) _has_vid=true; break ;;
+                    esac
+                done
+                if [[ "$_has_vid" == "true" ]]; then
+                    all_dirs+=("$_root")
+                    ((scan_count++))
+                    show_scan_progress "$scan_count"
+                fi
             fi
         done
         shopt -u nocasematch
